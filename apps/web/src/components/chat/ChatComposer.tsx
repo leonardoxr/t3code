@@ -2,7 +2,9 @@ import type {
   ApprovalRequestId,
   EnvironmentId,
   ModelSelection,
+  OrchestrationQueuedFollowUp,
   PreviewAnnotationPayload,
+  QueuedFollowUpId,
   ProviderApprovalDecision,
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
@@ -67,7 +69,7 @@ import { ComposerStashMenu } from "./ComposerStashMenu";
 import { compressImageForStash, compressImageToByteLimit } from "../../lib/imageCompression";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
-import { resolveShortcutCommand } from "../../keybindings";
+import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
 import {
   type TerminalContextDraft,
   type TerminalContextSelection,
@@ -90,6 +92,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ComposerQueuedFollowUps } from "./ComposerQueuedFollowUps";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
@@ -413,6 +416,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   hasSendableContent: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
   showSendWhileRunning?: boolean;
+  onQueueFollowUp: () => void;
+  queueFollowUpShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -442,6 +447,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         hasSendableContent={props.hasSendableContent}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         showSendWhileRunning={props.showSendWhileRunning ?? false}
+        onQueueFollowUp={props.onQueueFollowUp}
+        queueFollowUpShortcutLabel={props.queueFollowUpShortcutLabel}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -577,6 +584,13 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  /** Parks the draft as a queued follow-up instead of steering the live turn. */
+  onQueueFollowUp: (e?: { preventDefault: () => void }) => void;
+  queuedFollowUps: ReadonlyArray<OrchestrationQueuedFollowUp>;
+  onEditQueuedFollowUp: (followUpId: QueuedFollowUpId, text: string) => void;
+  onRemoveQueuedFollowUp: (followUpId: QueuedFollowUpId) => void;
+  onReorderQueuedFollowUp: (followUpId: QueuedFollowUpId, orderKey: string) => void;
+  onPromoteQueuedFollowUp: (followUpId: QueuedFollowUpId) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -662,6 +676,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
+    onQueueFollowUp,
+    queuedFollowUps,
+    onEditQueuedFollowUp,
+    onRemoveQueuedFollowUp,
+    onReorderQueuedFollowUp,
+    onPromoteQueuedFollowUp,
     onSelectActivePendingUserInputOption,
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
@@ -1835,8 +1855,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     showPlanFollowUpPrompt,
   ]);
 
+  /**
+   * The one funnel every composer submit goes through, so a click and a
+   * keystroke can never diverge. `delivery` picks what the draft becomes:
+   * "send" steers a live turn (today's behavior), "queue" parks it as a
+   * follow-up for when the thread goes idle.
+   */
   const submitComposer = useCallback(
-    (event?: { preventDefault: () => void }) => {
+    (event?: { preventDefault: () => void }, delivery: "send" | "queue" = "send") => {
       if (noProviderAvailable || isSendDisabled) {
         event?.preventDefault();
         return;
@@ -1862,7 +1888,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           // ChatView reports its final composed-input preflight through the
           // composer handle before its first asynchronous send step.
           providerInputRejectedRef.current = false;
-          onSend(sendEvent);
+          if (delivery === "queue") {
+            onQueueFollowUp(sendEvent);
+          } else {
+            onSend(sendEvent);
+          }
           return !providerInputRejectedRef.current;
         },
       });
@@ -1878,6 +1908,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       blurMobileComposerAfterSend,
       isSendDisabled,
       noProviderAvailable,
+      onQueueFollowUp,
       onSend,
       promptRef,
       shouldBlurMobileComposerOnSubmit,
@@ -2321,6 +2352,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   // ------------------------------------------------------------------
+  // Queue this follow-up (⌘⇧↵)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: getTerminalFocusOwner() !== null,
+          terminalOpen,
+          modelPickerOpen: isComposerModelPickerOpen,
+        },
+      });
+      if (command !== "composer.queueFollowUp") return;
+      // Claim the chord unconditionally: letting it through would insert a
+      // newline in the composer instead of queueing.
+      event.preventDefault();
+      event.stopPropagation();
+      if (
+        isCommandPaletteOpen() ||
+        isComposerApprovalState ||
+        pendingUserInputs.length > 0 ||
+        projectSelectionRequired ||
+        activePendingProgress !== null
+      ) {
+        return;
+      }
+      submitComposer(undefined, "queue");
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    activePendingProgress,
+    isComposerApprovalState,
+    isComposerModelPickerOpen,
+    keybindings,
+    pendingUserInputs.length,
+    projectSelectionRequired,
+    submitComposer,
+    terminalOpen,
+  ]);
+
+  // ------------------------------------------------------------------
   // Callbacks: images
   // ------------------------------------------------------------------
   const addComposerImages = async (files: File[]) => {
@@ -2490,6 +2562,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
   }, [onInterrupt]);
+  const handleQueueFollowUpPrimaryAction = useCallback(() => {
+    submitComposer(undefined, "queue");
+  }, [submitComposer]);
+  const queueFollowUpShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "composer.queueFollowUp"),
+    [keybindings],
+  );
   const handleImplementPlanInNewThreadPrimaryAction = useCallback(() => {
     void onImplementPlanInNewThread();
   }, [onImplementPlanInNewThread]);
@@ -2819,6 +2898,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
+                      onQueueFollowUp={handleQueueFollowUpPrimaryAction}
+                      queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -2918,6 +2999,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 />
               </ComposerCommandMenuLayer>
             )}
+
+            {!isComposerCollapsedMobile && queuedFollowUps.length > 0 ? (
+              <ComposerQueuedFollowUps
+                followUps={queuedFollowUps}
+                isRunning={phase === "running"}
+                onEdit={onEditQueuedFollowUp}
+                onRemove={onRemoveQueuedFollowUp}
+                onReorder={onReorderQueuedFollowUp}
+                onPromote={onPromoteQueuedFollowUp}
+                className="mb-3"
+              />
+            ) : null}
 
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
@@ -3102,6 +3195,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={false}
                     hasSendableContent={false}
                     preserveComposerFocusOnPointerDown
+                    onQueueFollowUp={handleQueueFollowUpPrimaryAction}
+                    queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3231,6 +3326,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   hasSendableContent={composerSendState.hasSendableContent}
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   showSendWhileRunning={isMobileViewport}
+                  onQueueFollowUp={handleQueueFollowUpPrimaryAction}
+                  queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

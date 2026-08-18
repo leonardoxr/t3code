@@ -147,7 +147,8 @@ function pinOrderMidpoint(a: string, b: string): string {
 /** Key that sorts strictly between two neighbors; null bounds mean "top of
     the pinned block" / "bottom of the keyed run". Returns null instead of
     throwing when existing keys are corrupt or out of order — callers fall
-    back to rewriting the section. */
+    back to rewriting the section. Also generates queued follow-up order keys,
+    which are always keyed and so never need the section rewrite. */
 export function pinOrderKeyBetween(before: string | null, after: string | null): string | null {
   const a = before ?? "";
   const b = after ?? "";

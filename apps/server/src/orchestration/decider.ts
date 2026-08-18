@@ -1,8 +1,11 @@
 import {
   EventId,
+  MAX_QUEUED_FOLLOW_UPS_PER_THREAD,
+  MessageId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type OrchestrationThread,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -15,6 +18,7 @@ import {
   requireActiveProjectWorkspaceRootAbsent,
   requireProject,
   requireProjectAbsent,
+  requireQueuedFollowUp,
   requireThread,
   requireThreadArchived,
   requireThreadAbsent,
@@ -177,6 +181,54 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
+
+/**
+ * Real activity resets ANY override: it wakes an explicitly settled thread, and
+ * it clears a keep-active pin back to neutral so the thread can auto-settle
+ * again after this burst of work goes stale. A snooze clears the same way —
+ * starting a turn on a snoozed thread is the user re-engaging, so the return
+ * ticket is spent. Shared by `thread.turn.start` and queued-follow-up dispatch,
+ * which must look identical to the rest of the system.
+ */
+const threadLifecycleResetEvents = Effect.fn("threadLifecycleResetEvents")(function* (input: {
+  readonly thread: OrchestrationThread;
+  readonly command: Pick<OrchestrationCommand, "commandId"> & { readonly createdAt: string };
+}): Effect.fn.Return<
+  ReadonlyArray<PlannedOrchestrationEvent>,
+  PlatformError.PlatformError,
+  Crypto.Crypto
+> {
+  const events: Array<PlannedOrchestrationEvent> = [];
+  const eventBase = {
+    aggregateKind: "thread",
+    aggregateId: input.thread.id,
+    occurredAt: input.command.createdAt,
+    commandId: input.command.commandId,
+  } as const;
+  if (input.thread.settledOverride !== null) {
+    events.push({
+      ...(yield* withEventBase(eventBase)),
+      type: "thread.unsettled",
+      payload: {
+        threadId: input.thread.id,
+        reason: "activity",
+        updatedAt: input.command.createdAt,
+      },
+    });
+  }
+  if (input.thread.snoozedUntil != null) {
+    events.push({
+      ...(yield* withEventBase(eventBase)),
+      type: "thread.unsnoozed",
+      payload: {
+        threadId: input.thread.id,
+        reason: "activity",
+        updatedAt: input.command.createdAt,
+      },
+    });
+  }
+  return events;
+});
 
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
@@ -995,45 +1047,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
-      // Real activity resets ANY override: it wakes an explicitly settled
-      // thread, and it clears a keep-active pin back to neutral so the
-      // thread can auto-settle again after this burst of work goes stale.
-      // A snooze clears the same way — sending a message to a snoozed
-      // thread is the user re-engaging, so the return ticket is spent.
-      const lifecycleResetEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
-      if (targetThread.settledOverride !== null) {
-        lifecycleResetEvents.push({
-          ...(yield* withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt: command.createdAt,
-            commandId: command.commandId,
-          })),
-          type: "thread.unsettled",
-          payload: {
-            threadId: command.threadId,
-            reason: "activity",
-            updatedAt: command.createdAt,
-          },
-        });
-      }
-      if (targetThread.snoozedUntil != null) {
-        lifecycleResetEvents.push({
-          ...(yield* withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt: command.createdAt,
-            commandId: command.commandId,
-          })),
-          type: "thread.unsnoozed",
-          payload: {
-            threadId: command.threadId,
-            reason: "activity",
-            updatedAt: command.createdAt,
-          },
-        });
-      }
-      return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
+      return [
+        ...(yield* threadLifecycleResetEvents({ thread: targetThread, command })),
+        userMessageEvent,
+        turnStartRequestedEvent,
+      ];
     }
 
     case "thread.turn.interrupt": {
@@ -1149,7 +1167,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         if (
           thread.settledOverride !== "settled" ||
           sessionComingAlive ||
-          threadHasQueuedTurnStart(thread, command.createdAt)
+          threadHasQueuedTurnStart(thread, command.createdAt) ||
+          // A pending queued follow-up is about to start a turn; stopping the
+          // session under it would strand the queue (paused and failed items
+          // are blocked on the user, so they must not keep the thread awake).
+          (thread.queuedFollowUps ?? []).some((followUp) => followUp.status === "pending")
         ) {
           return yield* Effect.fail(
             new OrchestrationCommandInvariantError({
@@ -1172,6 +1194,265 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+    }
+
+    case "thread.follow-up.queue": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if ((thread.queuedFollowUps ?? []).some((followUp) => followUp.id === command.followUpId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Queued follow-up '${command.followUpId}' already exists on thread '${command.threadId}'.`,
+        });
+      }
+      if ((thread.queuedFollowUps ?? []).length >= MAX_QUEUED_FOLLOW_UPS_PER_THREAD) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} already has ${MAX_QUEUED_FOLLOW_UPS_PER_THREAD} queued follow-ups`,
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-queued",
+        payload: {
+          threadId: command.threadId,
+          followUp: {
+            id: command.followUpId,
+            text: command.text,
+            attachments: command.attachments,
+            ...(command.modelSelection !== undefined
+              ? { modelSelection: command.modelSelection }
+              : {}),
+            runtimeMode: command.runtimeMode,
+            interactionMode: command.interactionMode,
+            orderKey: command.orderKey,
+            status: "pending",
+            lastError: null,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+      };
+    }
+
+    case "thread.follow-up.edit": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      yield* requireQueuedFollowUp({ thread, command, followUpId: command.followUpId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-edited",
+        payload: {
+          threadId: command.threadId,
+          followUpId: command.followUpId,
+          text: command.text,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.follow-up.remove": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      yield* requireQueuedFollowUp({ thread, command, followUpId: command.followUpId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-removed",
+        payload: {
+          threadId: command.threadId,
+          followUpId: command.followUpId,
+          reason: "user",
+          removedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.follow-up.reorder": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      yield* requireQueuedFollowUp({ thread, command, followUpId: command.followUpId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-reordered",
+        payload: {
+          threadId: command.threadId,
+          followUpId: command.followUpId,
+          orderKey: command.orderKey,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.follow-up.fail": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      yield* requireQueuedFollowUp({ thread, command, followUpId: command.followUpId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-failed",
+        payload: {
+          threadId: command.threadId,
+          followUpId: command.followUpId,
+          error: command.error,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.follow-up.promote": {
+      const targetThread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const followUp = yield* requireQueuedFollowUp({
+        thread: targetThread,
+        command,
+        followUpId: command.followUpId,
+      });
+      const crypto = yield* Crypto.Crypto;
+      const messageId = MessageId.make(yield* crypto.randomUUIDv4);
+      // Dispatching a queued follow-up must reproduce the choices it was
+      // queued with, and the session picks runtime mode up from thread state —
+      // so realign the thread first, exactly as a normal send does before
+      // starting a turn.
+      const modeEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      if (targetThread.runtimeMode !== followUp.runtimeMode) {
+        modeEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.runtime-mode-set",
+          payload: {
+            threadId: command.threadId,
+            runtimeMode: followUp.runtimeMode,
+            updatedAt: command.createdAt,
+          },
+        });
+      }
+      if (targetThread.interactionMode !== followUp.interactionMode) {
+        modeEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.interaction-mode-set",
+          payload: {
+            threadId: command.threadId,
+            interactionMode: followUp.interactionMode,
+            updatedAt: command.createdAt,
+          },
+        });
+      }
+      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId,
+          role: "user",
+          text: followUp.text,
+          attachments: followUp.attachments,
+          turnId: null,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId,
+          ...(followUp.modelSelection !== undefined
+            ? { modelSelection: followUp.modelSelection }
+            : {}),
+          runtimeMode: followUp.runtimeMode,
+          interactionMode: followUp.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+      // Dequeue last: a crash between these events leaves a visible duplicate
+      // send at worst, never a follow-up the user typed and never saw.
+      const dequeuedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.follow-up-removed",
+        payload: {
+          threadId: command.threadId,
+          followUpId: command.followUpId,
+          reason: "dispatched",
+          removedAt: command.createdAt,
+        },
+      };
+      return [
+        ...(yield* threadLifecycleResetEvents({ thread: targetThread, command })),
+        ...modeEvents,
+        userMessageEvent,
+        turnStartRequestedEvent,
+        dequeuedEvent,
+      ];
     }
 
     case "thread.session.set": {

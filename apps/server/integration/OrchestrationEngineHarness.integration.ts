@@ -27,6 +27,7 @@ import { TextGeneration, type TextGenerationShape } from "../src/textGeneration/
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/ProjectionCheckpoints.ts";
+import { ProjectionTurnRepositoryLive } from "../src/persistence/Layers/ProjectionTurns.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
@@ -46,6 +47,7 @@ import {
 import { ProviderService } from "../src/provider/Services/ProviderService.ts";
 import { AnalyticsService } from "../src/telemetry/Services/AnalyticsService.ts";
 import { CheckpointReactorLive } from "../src/orchestration/Layers/CheckpointReactor.ts";
+import { FollowUpQueueReactorLive } from "../src/orchestration/Layers/FollowUpQueueReactor.ts";
 import * as RepositoryIdentityResolver from "../src/project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "../src/orchestration/Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
@@ -57,6 +59,7 @@ import { OrchestrationReactorLive } from "../src/orchestration/Layers/Orchestrat
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
+import { FollowUpQueueReactor } from "../src/orchestration/Services/FollowUpQueueReactor.ts";
 import { ProviderRuntimeIngestionService } from "../src/orchestration/Services/ProviderRuntimeIngestion.ts";
 import {
   OrchestrationEngineService,
@@ -223,6 +226,7 @@ export interface OrchestrationIntegrationHarness {
   };
   readonly drainProviderRuntime: Effect.Effect<void>;
   readonly drainCheckpointReactor: Effect.Effect<void>;
+  readonly drainFollowUpQueueReactor: Effect.Effect<void>;
   readonly dispose: Effect.Effect<void, never>;
 }
 
@@ -370,6 +374,12 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
       Layer.provideMerge(
+        FollowUpQueueReactorLive.pipe(
+          Layer.provideMerge(runtimeServicesLayer.pipe(Layer.provideMerge(VcsProcess.layer))),
+          Layer.provideMerge(ProjectionTurnRepositoryLive),
+        ),
+      ),
+      Layer.provideMerge(
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
           drain: Effect.void,
@@ -406,6 +416,9 @@ export const makeOrchestrationIntegrationHarness = (
     ).pipe(Effect.orDie);
     const checkpointReactor = yield* tryRuntimePromise("load CheckpointReactor service", () =>
       runtime.runPromise(Effect.service(CheckpointReactor)),
+    ).pipe(Effect.orDie);
+    const followUpQueueReactor = yield* tryRuntimePromise("load FollowUpQueueReactor service", () =>
+      runtime.runPromise(Effect.service(FollowUpQueueReactor)),
     ).pipe(Effect.orDie);
     const snapshotQuery = yield* tryRuntimePromise("load ProjectionSnapshotQuery service", () =>
       runtime.runPromise(Effect.service(ProjectionSnapshotQuery)),
@@ -573,6 +586,7 @@ export const makeOrchestrationIntegrationHarness = (
       waitForReceipt,
       drainProviderRuntime: providerRuntimeIngestion.drain,
       drainCheckpointReactor: checkpointReactor.drain,
+      drainFollowUpQueueReactor: followUpQueueReactor.drain,
       dispose,
     } satisfies OrchestrationIntegrationHarness;
   });

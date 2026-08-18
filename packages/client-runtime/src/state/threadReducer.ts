@@ -8,6 +8,7 @@ import type {
   OrchestrationLatestTurn,
   OrchestrationMessage,
   OrchestrationSession,
+  OrchestrationQueuedFollowUp,
   OrchestrationThread,
   OrchestrationThreadActivity,
   TurnId,
@@ -258,12 +259,18 @@ export function applyThreadDetailEvent(
       };
 
     case "thread.turn-interrupt-requested": {
-      if (event.payload.turnId === undefined) {
-        return { kind: "unchanged" };
-      }
+      // Stop has to stop what happens next too, so the queue pauses even when
+      // the interrupt names no turn.
+      const queuedFollowUps = pauseQueuedFollowUps(thread.queuedFollowUps, event.occurredAt);
       const latestTurn = thread.latestTurn;
-      if (latestTurn === null || latestTurn.turnId !== event.payload.turnId) {
-        return { kind: "unchanged" };
+      const interruptsLatestTurn =
+        event.payload.turnId !== undefined &&
+        latestTurn !== null &&
+        latestTurn.turnId === event.payload.turnId;
+      if (!interruptsLatestTurn) {
+        return queuedFollowUps === thread.queuedFollowUps
+          ? { kind: "unchanged" }
+          : { kind: "updated", thread: { ...thread, queuedFollowUps } };
       }
       return {
         kind: "updated",
@@ -275,6 +282,7 @@ export function applyThreadDetailEvent(
             startedAt: latestTurn.startedAt ?? event.payload.createdAt,
             completedAt: latestTurn.completedAt ?? event.payload.createdAt,
           },
+          queuedFollowUps,
           updatedAt: event.occurredAt,
         },
       };
@@ -426,22 +434,28 @@ export function applyThreadDetailEvent(
       };
     }
 
-    case "thread.session-stop-requested":
-      return thread.session === null
-        ? { kind: "unchanged" }
-        : {
-            kind: "updated",
-            thread: {
-              ...thread,
-              session: {
-                ...thread.session,
-                status: "stopped",
-                activeTurnId: null,
-                updatedAt: event.payload.createdAt,
-              },
-              updatedAt: event.occurredAt,
-            },
-          };
+    case "thread.session-stop-requested": {
+      const queuedFollowUps = pauseQueuedFollowUps(thread.queuedFollowUps, event.occurredAt);
+      if (thread.session === null) {
+        return queuedFollowUps === thread.queuedFollowUps
+          ? { kind: "unchanged" }
+          : { kind: "updated", thread: { ...thread, queuedFollowUps } };
+      }
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          session: {
+            ...thread.session,
+            status: "stopped",
+            activeTurnId: null,
+            updatedAt: event.payload.createdAt,
+          },
+          queuedFollowUps,
+          updatedAt: event.occurredAt,
+        },
+      };
+    }
 
     // ── Proposed plans ──────────────────────────────────────────────
     case "thread.proposed-plan-upserted": {
@@ -592,6 +606,93 @@ export function applyThreadDetailEvent(
       };
     }
 
+    // ── Queued follow-ups ───────────────────────────────────────────
+    case "thread.follow-up-queued": {
+      const followUp = event.payload.followUp;
+      // Queueing something new is the user saying "go", so it lifts a pause an
+      // earlier stop installed on the rest of the queue.
+      const queuedFollowUps = pipe(
+        resumeQueuedFollowUps(thread.queuedFollowUps ?? [], event.occurredAt),
+        Arr.filter((entry) => entry.id !== followUp.id),
+        Arr.append(followUp),
+        Arr.sort(queuedFollowUpOrder),
+      );
+      return {
+        kind: "updated",
+        thread: { ...thread, queuedFollowUps, updatedAt: event.occurredAt },
+      };
+    }
+
+    case "thread.follow-up-edited":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+            entry.id === event.payload.followUpId
+              ? { ...entry, text: event.payload.text, updatedAt: event.payload.updatedAt }
+              : entry,
+          ),
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.follow-up-reordered":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          queuedFollowUps: pipe(
+            thread.queuedFollowUps ?? [],
+            Arr.map((entry) =>
+              entry.id === event.payload.followUpId
+                ? { ...entry, orderKey: event.payload.orderKey, updatedAt: event.payload.updatedAt }
+                : entry,
+            ),
+            Arr.sort(queuedFollowUpOrder),
+          ),
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.follow-up-failed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+            entry.id === event.payload.followUpId
+              ? {
+                  ...entry,
+                  status: "failed" as const,
+                  lastError: event.payload.error,
+                  updatedAt: event.payload.updatedAt,
+                }
+              : entry,
+          ),
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.follow-up-removed": {
+      const remaining = (thread.queuedFollowUps ?? []).filter(
+        (entry) => entry.id !== event.payload.followUpId,
+      );
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          // A dispatch is the queue running again, so siblings a stop paused
+          // resume with it; an explicit removal leaves them paused.
+          queuedFollowUps:
+            event.payload.reason === "dispatched"
+              ? resumeQueuedFollowUps(remaining, event.payload.removedAt)
+              : remaining,
+          updatedAt: event.occurredAt,
+        },
+      };
+    }
+
     // ── Events that don't mutate thread state directly ──────────────
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
@@ -604,6 +705,48 @@ export function applyThreadDetailEvent(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+const queuedFollowUpOrder = O.combine<OrchestrationQueuedFollowUp>(
+  O.mapInput(O.String, (followUp) => followUp.orderKey),
+  O.mapInput(O.String, (followUp) => followUp.id),
+);
+
+/**
+ * Holds the queue when the user stops or interrupts: pressing stop has to stop
+ * what happens next too. Returns the same array when nothing was pending, so
+ * callers can report "unchanged".
+ */
+function pauseQueuedFollowUps(
+  followUps: ReadonlyArray<OrchestrationQueuedFollowUp> | undefined,
+  updatedAt: string,
+): ReadonlyArray<OrchestrationQueuedFollowUp> | undefined {
+  if (followUps === undefined || followUps.every((followUp) => followUp.status !== "pending")) {
+    return followUps;
+  }
+  return followUps.map((followUp) =>
+    followUp.status === "pending"
+      ? { ...followUp, status: "paused" as const, updatedAt }
+      : followUp,
+  );
+}
+
+/**
+ * Lifts a stop-installed pause. Failed items keep their status: they are
+ * blocked on the user, and resuming them would retry a send that already broke.
+ */
+function resumeQueuedFollowUps(
+  followUps: ReadonlyArray<OrchestrationQueuedFollowUp>,
+  updatedAt: string,
+): ReadonlyArray<OrchestrationQueuedFollowUp> {
+  if (followUps.every((followUp) => followUp.status !== "paused")) {
+    return followUps;
+  }
+  return followUps.map((followUp) =>
+    followUp.status === "paused"
+      ? { ...followUp, status: "pending" as const, updatedAt }
+      : followUp,
+  );
+}
 
 /**
  * Turn state to settle a still-running latest turn with when its session

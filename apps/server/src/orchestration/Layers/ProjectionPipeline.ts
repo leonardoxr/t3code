@@ -28,6 +28,10 @@ import {
   type ProjectionThreadProposedPlan,
   ProjectionThreadProposedPlanRepository,
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import {
+  type ProjectionThreadQueuedFollowUp,
+  ProjectionThreadQueuedFollowUpRepository,
+} from "../../persistence/Services/ProjectionThreadQueuedFollowUps.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
   type ProjectionTurn,
@@ -40,6 +44,7 @@ import { ProjectionStateRepositoryLive } from "../../persistence/Layers/Projecti
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadQueuedFollowUpRepositoryLive } from "../../persistence/Layers/ProjectionThreadQueuedFollowUps.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
@@ -65,6 +70,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
+  threadQueuedFollowUps: "projection.thread-queued-follow-ups",
 } as const;
 
 type ProjectorName =
@@ -104,6 +110,8 @@ interface ProjectorDefinition {
 interface AttachmentSideEffects {
   readonly deletedThreadIds: Set<string>;
   readonly prunedThreadRelativePaths: Map<string, Set<string>>;
+  /** Attachments of a cancelled queued follow-up, deleted after the commit. */
+  readonly removedThreadRelativePaths: Map<string, Set<string>>;
 }
 
 const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsForProjection")(
@@ -327,17 +335,27 @@ function retainProjectionProposedPlansAfterRevert(
   );
 }
 
+/**
+ * Attachment files the thread still owns. Queued follow-ups count: their images
+ * are on disk before the follow-up ever becomes a message, so a revert prune
+ * that only looked at messages would delete files the queue still needs.
+ */
 function collectThreadAttachmentRelativePaths(
   threadId: string,
   messages: ReadonlyArray<ProjectionThreadMessage>,
+  queuedFollowUps: ReadonlyArray<ProjectionThreadQueuedFollowUp> = [],
 ): Set<string> {
   const threadSegment = toSafeThreadAttachmentSegment(threadId);
   if (!threadSegment) {
     return new Set();
   }
   const relativePaths = new Set<string>();
-  for (const message of messages) {
-    for (const attachment of message.attachments ?? []) {
+  const attachmentGroups = [
+    ...messages.map((message) => message.attachments ?? []),
+    ...queuedFollowUps.map((followUp) => followUp.attachments),
+  ];
+  for (const attachments of attachmentGroups) {
+    for (const attachment of attachments) {
       if (attachment.type !== "image") {
         continue;
       }
@@ -455,6 +473,36 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     );
   });
 
+  const removeThreadAttachments = Effect.fn("removeThreadAttachments")(function* (
+    threadId: string,
+    removedThreadRelativePaths: Set<string>,
+  ) {
+    if (sideEffects.deletedThreadIds.has(threadId)) {
+      return;
+    }
+
+    const threadSegment = toSafeThreadAttachmentSegment(threadId);
+    if (!threadSegment) {
+      yield* Effect.logWarning("skipping attachment removal for unsafe thread id", { threadId });
+      return;
+    }
+
+    // The ids came from this thread's own rows, but re-derive containment
+    // anyway: the path is joined against the attachments root either way.
+    yield* Effect.forEach(
+      removedThreadRelativePaths,
+      (relativePath) =>
+        Effect.gen(function* () {
+          const attachmentId = parseAttachmentIdFromRelativePath(relativePath);
+          if (!attachmentId || parseThreadSegmentFromAttachmentId(attachmentId) !== threadSegment) {
+            return;
+          }
+          yield* fileSystem.remove(path.join(attachmentsRootDir, relativePath), { force: true });
+        }),
+      { concurrency: 1 },
+    );
+  });
+
   yield* Effect.forEach(sideEffects.deletedThreadIds, deleteThreadAttachments, {
     concurrency: 1,
   });
@@ -463,6 +511,13 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     sideEffects.prunedThreadRelativePaths.entries(),
     ([threadId, keptThreadRelativePaths]) =>
       pruneThreadAttachments(threadId, keptThreadRelativePaths),
+    { concurrency: 1 },
+  );
+
+  yield* Effect.forEach(
+    sideEffects.removedThreadRelativePaths.entries(),
+    ([threadId, removedThreadRelativePaths]) =>
+      removeThreadAttachments(threadId, removedThreadRelativePaths),
     { concurrency: 1 },
   );
 });
@@ -476,6 +531,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadRepository = yield* ProjectionThreadRepository;
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
+    const projectionThreadQueuedFollowUpRepository =
+      yield* ProjectionThreadQueuedFollowUpRepository;
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
@@ -1014,7 +1071,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }).pipe(Effect.asVoid);
           attachmentSideEffects.prunedThreadRelativePaths.set(
             event.payload.threadId,
-            collectThreadAttachmentRelativePaths(event.payload.threadId, keptRows),
+            collectThreadAttachmentRelativePaths(
+              event.payload.threadId,
+              keptRows,
+              yield* projectionThreadQueuedFollowUpRepository.listByThreadId({
+                threadId: event.payload.threadId,
+              }),
+            ),
           );
           return;
         }
@@ -1069,6 +1132,144 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }).pipe(Effect.asVoid);
           return;
         }
+
+        default:
+          return;
+      }
+    });
+
+    const applyThreadQueuedFollowUpsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadQueuedFollowUpsProjection",
+    )(function* (event, attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.follow-up-queued": {
+          yield* projectionThreadQueuedFollowUpRepository.upsert({
+            followUpId: event.payload.followUp.id,
+            threadId: event.payload.threadId,
+            text: event.payload.followUp.text,
+            attachments: event.payload.followUp.attachments,
+            modelSelection: event.payload.followUp.modelSelection ?? null,
+            runtimeMode: event.payload.followUp.runtimeMode,
+            interactionMode: event.payload.followUp.interactionMode,
+            orderKey: event.payload.followUp.orderKey,
+            status: event.payload.followUp.status,
+            lastError: event.payload.followUp.lastError,
+            createdAt: event.payload.followUp.createdAt,
+            updatedAt: event.payload.followUp.updatedAt,
+          });
+          // Queueing something new is the user saying "go": it lifts a pause an
+          // earlier stop installed on the rest of the queue.
+          yield* projectionThreadQueuedFollowUpRepository.setStatusByThreadId({
+            threadId: event.payload.threadId,
+            fromStatus: "paused",
+            toStatus: "pending",
+            updatedAt: event.payload.followUp.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.follow-up-edited": {
+          const existingRow = yield* projectionThreadQueuedFollowUpRepository.getById({
+            followUpId: event.payload.followUpId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadQueuedFollowUpRepository.upsert({
+            ...existingRow.value,
+            text: event.payload.text,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.follow-up-reordered": {
+          const existingRow = yield* projectionThreadQueuedFollowUpRepository.getById({
+            followUpId: event.payload.followUpId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadQueuedFollowUpRepository.upsert({
+            ...existingRow.value,
+            orderKey: event.payload.orderKey,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.follow-up-failed": {
+          const existingRow = yield* projectionThreadQueuedFollowUpRepository.getById({
+            followUpId: event.payload.followUpId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadQueuedFollowUpRepository.upsert({
+            ...existingRow.value,
+            status: "failed",
+            lastError: event.payload.error,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.follow-up-removed": {
+          const existingRow = yield* projectionThreadQueuedFollowUpRepository.getById({
+            followUpId: event.payload.followUpId,
+          });
+          yield* projectionThreadQueuedFollowUpRepository.deleteById({
+            followUpId: event.payload.followUpId,
+          });
+          if (event.payload.reason === "dispatched") {
+            // The queue is running again, so siblings a stop paused resume with
+            // it. The dispatched follow-up's attachments now belong to its
+            // message and must survive.
+            yield* projectionThreadQueuedFollowUpRepository.setStatusByThreadId({
+              threadId: event.payload.threadId,
+              fromStatus: "paused",
+              toStatus: "pending",
+              updatedAt: event.payload.removedAt,
+            });
+            return;
+          }
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          const removedRelativePaths =
+            attachmentSideEffects.removedThreadRelativePaths.get(event.payload.threadId) ??
+            new Set<string>();
+          for (const relativePath of collectThreadAttachmentRelativePaths(
+            event.payload.threadId,
+            [],
+            [existingRow.value],
+          )) {
+            removedRelativePaths.add(relativePath);
+          }
+          attachmentSideEffects.removedThreadRelativePaths.set(
+            event.payload.threadId,
+            removedRelativePaths,
+          );
+          return;
+        }
+
+        // Stop and interrupt pause the queue rather than firing into the gap the
+        // user just made: pressing stop has to stop what happens next too.
+        case "thread.turn-interrupt-requested":
+        case "thread.session-stop-requested":
+          yield* projectionThreadQueuedFollowUpRepository.setStatusByThreadId({
+            threadId: event.payload.threadId,
+            fromStatus: "pending",
+            toStatus: "paused",
+            updatedAt: event.payload.createdAt,
+          });
+          return;
+
+        case "thread.deleted":
+          yield* projectionThreadQueuedFollowUpRepository.deleteByThreadId({
+            threadId: event.payload.threadId,
+          });
+          return;
 
         default:
           return;
@@ -1620,6 +1821,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyThreadProposedPlansProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadQueuedFollowUps,
+        apply: applyThreadQueuedFollowUpsProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
         apply: applyThreadActivitiesProjection,
       },
@@ -1652,6 +1857,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       const attachmentSideEffects: AttachmentSideEffects = {
         deletedThreadIds: new Set<string>(),
         prunedThreadRelativePaths: new Map<string, Set<string>>(),
+        removedThreadRelativePaths: new Map<string, Set<string>>(),
       };
 
       yield* sql.withTransaction(
@@ -1741,6 +1947,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadRepositoryLive),
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
+  Layer.provideMerge(ProjectionThreadQueuedFollowUpRepositoryLive),
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),

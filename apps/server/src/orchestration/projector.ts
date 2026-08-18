@@ -15,6 +15,11 @@ import {
   ProjectDeletedPayload,
   ProjectMetaUpdatedPayload,
   ThreadActivityAppendedPayload,
+  ThreadFollowUpEditedPayload,
+  ThreadFollowUpFailedPayload,
+  ThreadFollowUpQueuedPayload,
+  ThreadFollowUpRemovedPayload,
+  ThreadFollowUpReorderedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
@@ -183,6 +188,35 @@ function compareThreadActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+type QueuedFollowUp = NonNullable<OrchestrationThread["queuedFollowUps"]>[number];
+
+/** Queue order is `orderKey` ascending with an id tiebreak, everywhere. */
+function sortQueuedFollowUps(
+  followUps: ReadonlyArray<QueuedFollowUp>,
+): ReadonlyArray<QueuedFollowUp> {
+  return [...followUps].toSorted(
+    (left, right) => left.orderKey.localeCompare(right.orderKey) || left.id.localeCompare(right.id),
+  );
+}
+
+/**
+ * Lifts a stop-installed pause. Failed items keep their status: they are
+ * blocked on the user, and resuming them would retry a send that already broke.
+ */
+function resumeQueuedFollowUps(
+  followUps: ReadonlyArray<QueuedFollowUp>,
+  updatedAt: string,
+): ReadonlyArray<QueuedFollowUp> {
+  if (followUps.every((followUp) => followUp.status !== "paused")) {
+    return followUps;
+  }
+  return followUps.map((followUp) =>
+    followUp.status === "paused"
+      ? { ...followUp, status: "pending" as const, updatedAt }
+      : followUp,
+  );
 }
 
 export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
@@ -799,6 +833,158 @@ export function projectEvent(
           };
         }),
       );
+
+    case "thread.follow-up-queued":
+      return decodeForEvent(ThreadFollowUpQueuedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          // Queueing something new is the user saying "go", so it lifts a pause
+          // an earlier stop installed on the rest of the queue.
+          const queuedFollowUps = sortQueuedFollowUps([
+            ...resumeQueuedFollowUps(thread.queuedFollowUps ?? [], event.occurredAt).filter(
+              (entry) => entry.id !== payload.followUp.id,
+            ),
+            payload.followUp,
+          ]);
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedFollowUps,
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.follow-up-edited":
+      return decodeForEvent(ThreadFollowUpEditedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+                entry.id === payload.followUpId
+                  ? { ...entry, text: payload.text, updatedAt: payload.updatedAt }
+                  : entry,
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.follow-up-removed":
+      return decodeForEvent(
+        ThreadFollowUpRemovedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          const remaining = (thread.queuedFollowUps ?? []).filter(
+            (entry) => entry.id !== payload.followUpId,
+          );
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              // A dispatch is the queue running again, so siblings a stop paused
+              // resume with it; an explicit removal leaves them paused.
+              queuedFollowUps:
+                payload.reason === "dispatched"
+                  ? resumeQueuedFollowUps(remaining, payload.removedAt)
+                  : remaining,
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.follow-up-reordered":
+      return decodeForEvent(
+        ThreadFollowUpReorderedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedFollowUps: sortQueuedFollowUps(
+                (thread.queuedFollowUps ?? []).map((entry) =>
+                  entry.id === payload.followUpId
+                    ? { ...entry, orderKey: payload.orderKey, updatedAt: payload.updatedAt }
+                    : entry,
+                ),
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.follow-up-failed":
+      return decodeForEvent(ThreadFollowUpFailedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+                entry.id === payload.followUpId
+                  ? {
+                      ...entry,
+                      status: "failed" as const,
+                      lastError: payload.error,
+                      updatedAt: payload.updatedAt,
+                    }
+                  : entry,
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    // Stop and interrupt pause the queue rather than firing into the gap the
+    // user just made: pressing stop has to stop what happens next too. Derived
+    // here instead of commanded, so there is one source of truth for "held".
+    case "thread.turn-interrupt-requested":
+    case "thread.session-stop-requested": {
+      const threadId = event.payload.threadId;
+      const thread = nextBase.threads.find((entry) => entry.id === threadId);
+      if (!thread || (thread.queuedFollowUps ?? []).every((entry) => entry.status !== "pending")) {
+        return Effect.succeed(nextBase);
+      }
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, threadId, {
+          queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+            entry.status === "pending"
+              ? { ...entry, status: "paused" as const, updatedAt: event.occurredAt }
+              : entry,
+          ),
+        }),
+      });
+    }
 
     default:
       return Effect.succeed(nextBase);

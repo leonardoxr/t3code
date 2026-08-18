@@ -38,6 +38,10 @@ The main durable unit of conversation and workspace history. In [the orchestrati
 
 A single user-to-assistant work cycle inside a thread. It starts with user input and ends when the session leaves `running` status, which [projector.ts][4] treats as the authoritative completion signal (`settledTurnStateForSessionStatus`). Checkpoint and diff work may settle afterward without changing when the turn ended. See [the contracts][1] and [ProviderRuntimeIngestion.ts][5].
 
+#### Queued follow-up
+
+A message the user parked instead of steering the running turn with. In [the contracts][1] a queued follow-up carries the text, attachments, model, runtime mode, and interaction mode it was queued with, plus a fractional `orderKey` and a `pending | paused | failed` status. It is thread state, projected into `projection_thread_queued_follow_ups`, so it survives reload, reconnect, and restart. [FollowUpQueueReactor.ts][25] dispatches the head only when the thread is genuinely idle — nothing running or starting, no session error, no approval or user-input request waiting on the user — and an interrupt or session stop pauses the queue so stopping the agent also stops what it would have done next.
+
 #### Activity
 
 A user-visible log item attached to a thread. In [the contracts][1], activities cover important non-message events like approvals, tool actions, and failures. They are projected into thread state in [projector.ts][4].
@@ -78,7 +82,7 @@ The current materialized view of orchestration state. In [the contracts][1], it 
 
 #### Reactor
 
-A side-effecting service that handles follow-up work after events or runtime signals. Examples include [CheckpointReactor.ts][6], [ProviderCommandReactor.ts][12], and [ProviderRuntimeIngestion.ts][5].
+A side-effecting service that handles follow-up work after events or runtime signals. Examples include [CheckpointReactor.ts][6], [ProviderCommandReactor.ts][12], [ProviderRuntimeIngestion.ts][5], and [FollowUpQueueReactor.ts][25].
 
 #### Receipt
 
@@ -179,3 +183,4 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ../../apps/server/src/orchestration/Layers/FollowUpQueueReactor.ts
