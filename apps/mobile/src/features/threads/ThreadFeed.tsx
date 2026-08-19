@@ -129,6 +129,66 @@ const TURN_FOLD_HEIGHT = 56; // min-h-11 (44) + mb-3 (12)
 // The working row has no min-height clamp — its height follows the scaled
 // text-xs line height (see workingRowHeight in ThreadFeed).
 const WORKING_ROW_VERTICAL_EXTRAS = 24; // py-1 (8) + mb-4 (16)
+// Thinking rows are prose: a long chain of thought is clamped to three lines
+// until the reader asks for the rest, so a collapsed row's height is bounded
+// even though its wrap is not knowable without measuring (see
+// collapsedThinkingRowHeight).
+const THINKING_CLAMP_LINES = 3;
+const THINKING_ROW_VERTICAL_EXTRAS = 10; // py-0.5 (4) + mb-1.5 (6)
+const THINKING_TOGGLE_TOP_PADDING = 4; // pt-1 above the "Show thinking" button
+// A thought long enough to hide behind the toggle: matches the web timeline.
+const THINKING_TOGGLE_MIN_CHARS = 320;
+// DM Sans averages a hair under half its point size per glyph across prose.
+// Only used to guess how many lines a thought wraps to before it is measured.
+const THINKING_AVERAGE_GLYPH_WIDTH_RATIO = 0.5;
+const THINKING_RULE_INSET = 18; // ml-1.5 (6) + pl-3 (12)
+
+/**
+ * A thought long enough that the row hides its tail behind the toggle. Render
+ * and pre-measurement must agree on this or the row's reserved height is off
+ * by the toggle's line.
+ */
+function thinkingRowShowsToggle(text: string): boolean {
+  return text.length > THINKING_TOGGLE_MIN_CHARS || text.includes("\n");
+}
+
+/**
+ * Pre-measurement height of a collapsed thinking row. Prose wraps, so an exact
+ * height needs a measure pass — but the clamp bounds the error at a couple of
+ * lines, and estimating the wrap keeps a one-line thought from reserving three
+ * lines of blank space above the viewport.
+ */
+function collapsedThinkingRowHeight(
+  text: string,
+  contentWidth: number,
+  baseFontSize: number,
+): number {
+  const lineHeight = scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.label, baseFontSize);
+  const fontSize =
+    lineHeight * (MOBILE_TYPOGRAPHY.label.fontSize / MOBILE_TYPOGRAPHY.label.lineHeight);
+  const charsPerLine = Math.max(
+    8,
+    Math.floor(
+      Math.max(0, contentWidth - THINKING_RULE_INSET) /
+        (fontSize * THINKING_AVERAGE_GLYPH_WIDTH_RATIO),
+    ),
+  );
+  let lines = 0;
+  for (const paragraph of text.split("\n")) {
+    lines += Math.max(1, Math.ceil(paragraph.length / charsPerLine));
+    if (lines >= THINKING_CLAMP_LINES) {
+      break;
+    }
+  }
+  return (
+    THINKING_ROW_VERTICAL_EXTRAS +
+    Math.min(lines, THINKING_CLAMP_LINES) * lineHeight +
+    (thinkingRowShowsToggle(text)
+      ? THINKING_TOGGLE_TOP_PADDING +
+        scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.micro, baseFontSize)
+      : 0)
+  );
+}
 // The quiet variant stacks a second text-xs line under the first (gap-1).
 const QUIET_WORKING_ROW_GAP = 4;
 
@@ -859,6 +919,16 @@ function renderFeedEntry(
     );
   }
 
+  if (entry.type === "thinking") {
+    return (
+      <ThinkingTimelineRow
+        text={entry.text}
+        expanded={props.expandedWorkRows[entry.id] ?? false}
+        onToggle={() => props.onToggleWorkRow(entry.id)}
+      />
+    );
+  }
+
   if (entry.type === "message") {
     const { message } = entry;
     const isUser = message.role === "user";
@@ -1062,6 +1132,46 @@ const WorkingTimelineRow = memo(function WorkingTimelineRow(props: {
       <Text className="font-t3-medium text-xs tabular-nums text-neutral-600 dark:text-neutral-400">
         Working for {durationLabel}
       </Text>
+    </View>
+  );
+});
+
+/**
+ * Thinking rendered as prose in the flow, not as a tool row. Clamped so a long
+ * chain of thought cannot push the answer off screen; the clamp is a static
+ * numberOfLines swap, so there is no measurement pass and no animation. The
+ * expanded flag lives in the feed's interaction state, not here: LegendList
+ * remounts rows when they scroll back into view, and row-local state would
+ * silently re-collapse a thought the reader had opened.
+ */
+const ThinkingTimelineRow = memo(function ThinkingTimelineRow(props: {
+  readonly text: string;
+  readonly expanded: boolean;
+  readonly onToggle: () => void;
+}) {
+  return (
+    <View className="mb-1.5 ml-1.5 border-l border-neutral-300/60 py-0.5 pl-3 dark:border-white/[0.12]">
+      <Text
+        selectable
+        className="text-xs text-foreground-muted"
+        style={{ fontStyle: "italic" }}
+        {...(props.expanded ? {} : { numberOfLines: THINKING_CLAMP_LINES })}
+      >
+        {props.text}
+      </Text>
+      {thinkingRowShowsToggle(props.text) ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: props.expanded }}
+          hitSlop={8}
+          onPress={props.onToggle}
+          className="pt-1"
+        >
+          <Text className="font-t3-medium text-3xs text-foreground-muted opacity-70">
+            {props.expanded ? "Show less" : "Show thinking"}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 });
@@ -1653,20 +1763,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       ? props.latestTurn.turnId
       : null;
 
+  // A deviation the reader set on the latest turn belongs to that turn alone:
+  // once the next turn starts, the old one is history and folds at its default.
+  // An interrupted turn needs no entry here — it is still the latest turn, so
+  // its fold already defaults to open and its work stays on screen.
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestTurn;
-    if (!props.latestTurn || !previous) {
-      return;
-    }
-    if (props.latestTurn.turnId === previous.turnId) {
-      if (previous.state === "running" && props.latestTurn.state === "interrupted") {
-        const interruptedTurnId = props.latestTurn.turnId;
-        setInteractionState((current) => ({
-          ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(interruptedTurnId),
-        }));
-      }
+    if (!props.latestTurn || !previous || props.latestTurn.turnId === previous.turnId) {
       return;
     }
     setInteractionState((current) => {
@@ -1814,6 +1918,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           return WORK_GROUP_TOGGLE_HEIGHT;
         case "working":
           return workingRowHeight;
+        case "thinking":
+          // Expanded thoughts are unbounded prose — measure those.
+          return expandedWorkRows[entry.id]
+            ? undefined
+            : collapsedThinkingRowHeight(entry.text, contentWidth, appearance.baseFontSize);
         case "activity-group":
           // Expanded rows append a variable detail block — fall back to
           // measurement for those groups. Inline images need no such escape
@@ -1826,7 +1935,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           return undefined;
       }
     },
-    [expandedWorkRows, workingRowHeight, appearance.baseFontSize],
+    [expandedWorkRows, workingRowHeight, contentWidth, appearance.baseFontSize],
   );
 
   const renderItem = useCallback(

@@ -377,23 +377,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [suspendEndScrollMaintenanceForDisclosure],
   );
 
-  // An in-session interrupt leaves its turn expanded so the user keeps their
-  // place; the next turn (or a reload, since this is local state) folds it.
+  // A deviation the reader set on the latest turn belongs to that turn alone:
+  // once the next turn starts, the old one is history and folds at its default.
+  // An interrupted turn needs no entry here — it is still the latest turn, so
+  // its fold already defaults to open and its work stays on screen.
   const previousLatestTurnRef = useRef(latestTurn);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = latestTurn;
-    if (!latestTurn || previous?.turnId === undefined) {
-      return;
-    }
-    if (latestTurn.turnId === previous.turnId) {
-      if (previous.state === "running" && latestTurn.state === "interrupted") {
-        setExpandedTurnIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestTurn.turnId);
-          return next;
-        });
-      }
+    if (!latestTurn || previous?.turnId === undefined || latestTurn.turnId === previous.turnId) {
       return;
     }
     setExpandedTurnIds((existing) => {
@@ -969,6 +961,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "turn-plan" ? <TurnPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
+      {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
     </div>
   );
 });
@@ -1295,6 +1288,51 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+});
+
+/**
+ * Thinking rendered as prose in the flow, not as a tool row. Clamped so a long
+ * chain of thought does not push the answer off screen; the clamp is a static
+ * class swap on click, so there is no measurement pass and no repaint loop.
+ */
+const ThinkingTimelineRow = memo(function ThinkingTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "thinking" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [expanded, setExpanded] = useState(false);
+  const isLong = row.text.length > 320 || row.text.includes("\n");
+  return (
+    <div className="py-0.5 pl-1.5">
+      <div className="flex min-w-0 gap-2 border-border/40 border-s ps-3">
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              "text-[12px] text-secondary-label italic [&_*]:!text-secondary-label",
+              !expanded && "line-clamp-3",
+            )}
+          >
+            <ChatMarkdown
+              text={row.text}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+            />
+          </div>
+          {isLong ? (
+            <button
+              type="button"
+              className="mt-0.5 text-[11px] text-muted-foreground/60 hover:text-secondary-label"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "Show less" : "Show thinking"}
+            </button>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 });
@@ -2430,7 +2468,6 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       ? null
       : rawPreview;
   const displayText = preview ? `${heading} - ${preview}` : heading;
-  const reasoningText = workEntry.reasoningText;
   const toolCode = workEntry.toolInfo?.code;
   // Output and diffs are not on the wire — a tool row asks for its own body the
   // first time it is expanded, and the query caches it per activity.
@@ -2438,27 +2475,24 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
     environmentId: ctx.activeThreadEnvironmentId,
     threadId: rowThreadId,
     activityId: workEntry.id,
-    enabled: expanded && reasoningText === undefined && workLogEntryIsToolLike(workEntry),
+    enabled: expanded && workLogEntryIsToolLike(workEntry),
   });
   const fullOutputText = output.data?.text ?? undefined;
   const diffs = output.data?.diffs;
   // LSP results are markdown (hover docs, fenced signatures); render them
   // through ChatMarkdown instead of the monospace <pre>.
   const renderResultAsMarkdown = workEntry.toolInfo?.name === "lsp" && fullOutputText !== undefined;
-  const expandedBody = reasoningText
-    ? null
-    : buildToolCallExpandedBody(workEntry, workspaceRoot, {
-        ...(fullOutputText !== undefined ? { fullOutputText } : {}),
-        omitFullOutput: renderResultAsMarkdown,
-      });
+  const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot, {
+    ...(fullOutputText !== undefined ? { fullOutputText } : {}),
+    omitFullOutput: renderResultAsMarkdown,
+  });
   const hasDiffs = (diffs?.length ?? 0) > 0;
   const canExpand =
     expandedBody !== null ||
     hasDiffs ||
     toolCode !== undefined ||
     renderResultAsMarkdown ||
-    workLogEntryIsToolLike(workEntry) ||
-    (reasoningText !== undefined && reasoningText !== workEntry.label);
+    workLogEntryIsToolLike(workEntry);
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2477,9 +2511,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
     ? "font-medium text-warning"
     : showDestructiveRowStyle
       ? "font-medium text-destructive"
-      : reasoningText !== undefined
-        ? "font-normal italic text-secondary-label"
-        : "font-medium text-foreground";
+      : "font-medium text-foreground";
   const turnSettled = !activity.activeTurnInProgress;
   const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
   const showSuccessIndicator =
@@ -2593,46 +2625,34 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
-          {reasoningText !== undefined ? (
+          {toolCode ? (
             <ChatMarkdown
-              text={reasoningText}
+              text={`\`\`\`\`${toolCode.language}\n${toolCode.text}\n\`\`\`\``}
               cwd={ctx.markdownCwd}
               threadRef={ctx.threadRef ?? undefined}
               skills={ctx.skills}
-              className="text-secondary-label text-[12px] italic"
+              className="text-[12px]"
             />
-          ) : (
-            <>
-              {toolCode ? (
-                <ChatMarkdown
-                  text={`\`\`\`\`${toolCode.language}\n${toolCode.text}\n\`\`\`\``}
-                  cwd={ctx.markdownCwd}
-                  threadRef={ctx.threadRef ?? undefined}
-                  skills={ctx.skills}
-                  className="text-[12px]"
-                />
-              ) : null}
-              {expandedBody ? (
-                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
-              ) : null}
-              {renderResultAsMarkdown && fullOutputText ? (
-                <ChatMarkdown
-                  text={fullOutputText}
-                  cwd={ctx.markdownCwd}
-                  threadRef={ctx.threadRef ?? undefined}
-                  skills={ctx.skills}
-                  className="mt-1 text-secondary-label text-[12px]"
-                />
-              ) : null}
-              {diffs && diffs.length > 0 ? (
-                <WorkEntryDiffSection
-                  diffs={diffs}
-                  resolvedTheme={ctx.resolvedTheme}
-                  workspaceRoot={workspaceRoot}
-                />
-              ) : null}
-            </>
-          )}
+          ) : null}
+          {expandedBody ? (
+            <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+          ) : null}
+          {renderResultAsMarkdown && fullOutputText ? (
+            <ChatMarkdown
+              text={fullOutputText}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+              className="mt-1 text-secondary-label text-[12px]"
+            />
+          ) : null}
+          {diffs && diffs.length > 0 ? (
+            <WorkEntryDiffSection
+              diffs={diffs}
+              resolvedTheme={ctx.resolvedTheme}
+              workspaceRoot={workspaceRoot}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -678,14 +678,242 @@ describe("deriveMessagesTimelineRows", () => {
       revertTurnCountByUserMessageId: new Map(),
     });
 
+    // The latest turn keeps its work on screen — you just stopped it, so what
+    // it managed to do is the thing you want to read. The fold header still
+    // carries the stopped label and duration, and clicking it collapses.
     expect(rows).toEqual([
       expect.objectContaining({
         kind: "turn-fold",
         turnId: "turn-1",
         label: "You stopped after 47s",
-        expanded: false,
+        expanded: true,
       }),
+      expect.objectContaining({ kind: "work", id: "work-entry-1" }),
     ]);
+
+    // …and because the set records a deviation from that default, naming the
+    // turn in it collapses the fold instead of expanding it again. An effect
+    // that "kept the stopped turn open" by adding it here would hide the work.
+    const deviated = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "work-entry-1",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: {
+            id: "work-1",
+            createdAt: "2026-01-01T00:00:05Z",
+            turnId: "turn-1" as never,
+            label: "Ran command",
+            tone: "tool" as const,
+          },
+        },
+      ],
+      latestTurn: {
+        turnId: "turn-1" as never,
+        state: "interrupted",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:47Z",
+      },
+      expandedTurnIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(deviated).toEqual([
+      expect.objectContaining({ kind: "turn-fold", turnId: "turn-1", expanded: false }),
+    ]);
+  });
+
+  it("folds turns older than the latest, and reopens them on toggle", () => {
+    const entriesForTurn = (turn: string, at: string) => [
+      {
+        id: `work-entry-${turn}`,
+        kind: "work" as const,
+        createdAt: at,
+        entry: {
+          id: `work-${turn}`,
+          createdAt: at,
+          turnId: turn as never,
+          label: "Ran command",
+          tone: "tool" as const,
+        },
+      },
+      {
+        id: `assistant-${turn}`,
+        kind: "message" as const,
+        createdAt: at,
+        message: {
+          id: `assistant-${turn}` as never,
+          role: "assistant" as const,
+          text: "Done",
+          turnId: turn as never,
+          createdAt: at,
+          updatedAt: at,
+          streaming: false,
+        },
+      },
+    ];
+    const input = {
+      timelineEntries: [
+        ...entriesForTurn("turn-1", "2026-01-01T00:00:05Z"),
+        ...entriesForTurn("turn-2", "2026-01-01T00:01:05Z"),
+      ],
+      latestTurn: {
+        turnId: "turn-2" as never,
+        state: "completed" as const,
+        startedAt: "2026-01-01T00:01:00Z",
+        completedAt: "2026-01-01T00:01:05Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+
+    // turn-1 is history: folded. turn-2 is the latest: open.
+    const rows = deriveMessagesTimelineRows(input);
+    expect(rows.map((row) => row.id)).toEqual([
+      "turn-fold:turn-1",
+      "assistant-turn-1",
+      "turn-fold:turn-2",
+      "work-entry-turn-2",
+      "assistant-turn-2",
+    ]);
+
+    // The toggle set records a deviation from each fold's default, so the same
+    // set opens turn-1 and closes turn-2.
+    const toggled = deriveMessagesTimelineRows({
+      ...input,
+      expandedTurnIds: new Set(["turn-1", "turn-2"] as never[]),
+    });
+    expect(toggled.map((row) => row.id)).toEqual([
+      "turn-fold:turn-1",
+      "work-entry-turn-1",
+      "assistant-turn-1",
+      "turn-fold:turn-2",
+      "assistant-turn-2",
+    ]);
+  });
+
+  it("renders thinking as its own inline row, never inside a tool group", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "thinking-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:01Z",
+          entry: {
+            id: "thinking-1",
+            createdAt: "2026-01-01T00:00:01Z",
+            turnId: "turn-1" as never,
+            label: "Weighing the retry path",
+            tone: "thinking" as const,
+            reasoningText: "Weighing the retry path\nagainst just failing fast.",
+          },
+        },
+        {
+          id: "tool-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:02Z",
+          entry: {
+            id: "tool-1",
+            createdAt: "2026-01-01T00:00:02Z",
+            turnId: "turn-1" as never,
+            label: "Ran command",
+            tone: "tool" as const,
+          },
+        },
+      ],
+      latestTurn: {
+        turnId: "turn-1" as never,
+        state: "running" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      runningTurnId: "turn-1" as never,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const thinking = rows.find((row) => row.kind === "thinking");
+    expect(thinking).toMatchObject({
+      id: "thinking-entry",
+      text: "Weighing the retry path\nagainst just failing fast.",
+    });
+    // The tool row stays a work row, and the thinking row did not get absorbed
+    // into its group — grouping breaks on prose.
+    const work = rows.filter((row) => row.kind === "work");
+    expect(work).toHaveLength(1);
+    expect(work[0]?.kind === "work" && work[0].groupedEntries.map((entry) => entry.id)).toEqual([
+      "tool-1",
+    ]);
+  });
+
+  it("shows every work row of the live turn instead of collapsing to the last one", () => {
+    const toolEntry = (index: number) => ({
+      id: `tool-entry-${index}`,
+      kind: "work" as const,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      entry: {
+        id: `tool-${index}`,
+        createdAt: `2026-01-01T00:00:0${index}Z`,
+        turnId: "turn-1" as never,
+        label: "Ran command",
+        detail: `step ${index}`,
+        tone: "tool" as const,
+      },
+    });
+    const timelineEntries = [toolEntry(1), toolEntry(2), toolEntry(3)];
+
+    const live = deriveMessagesTimelineRows({
+      timelineEntries,
+      latestTurn: {
+        turnId: "turn-1" as never,
+        state: "running" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      runningTurnId: "turn-1" as never,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    // Live: all three render (one group row renders each of its entries), and
+    // there is no "+N previous" toggle hiding any of them.
+    const liveEntryIds = live.flatMap((row) =>
+      row.kind === "work" ? row.groupedEntries.map((entry) => entry.id) : [],
+    );
+    expect(liveEntryIds).toEqual(["tool-1", "tool-2", "tool-3"]);
+    expect(live.some((row) => row.kind === "work-toggle")).toBe(false);
+
+    // Once a newer turn exists, turn-1 is history: folded away entirely, and
+    // reopening it shows the condensed summary (last row + "+N" toggle)
+    // rather than the full transcript.
+    const reopenedOldTurn = deriveMessagesTimelineRows({
+      timelineEntries,
+      latestTurn: {
+        turnId: "turn-2" as never,
+        state: "completed" as const,
+        startedAt: "2026-01-01T00:01:00Z",
+        completedAt: "2026-01-01T00:01:04Z",
+      },
+      expandedTurnIds: new Set(["turn-1"] as never[]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    const reopenedEntryIds = reopenedOldTurn.flatMap((row) =>
+      row.kind === "work" ? row.groupedEntries.map((entry) => entry.id) : [],
+    );
+    expect(reopenedEntryIds).toEqual(["tool-3"]);
+    expect(reopenedOldTurn.some((row) => row.kind === "work-toggle")).toBe(true);
   });
 
   it("keeps the previous turn folded while a newly sent message awaits its turn", () => {

@@ -39,6 +39,7 @@ const emitStaleXAiPromptCompleteBeforeSecondHang =
 const emitOverlappingXAiPromptCompleteOutOfOrder =
   process.env.T3_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
+const promptErrorDetails = process.env.T3_ACP_PROMPT_ERROR_DETAILS;
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
@@ -464,6 +465,14 @@ const program = Effect.gen(function* () {
 
       if (Number.isFinite(promptDelayMs) && promptDelayMs > 0) {
         yield* Effect.sleep(`${promptDelayMs} millis`);
+      }
+
+      if (promptErrorDetails !== undefined) {
+        // The shape an ACP agent produces for an unclassified handler throw:
+        // the standard "Internal error" with the real sentence in `data`.
+        return yield* AcpError.AcpRequestError.internalError("Internal error", {
+          details: promptErrorDetails,
+        });
       }
 
       if (failPrompt) {

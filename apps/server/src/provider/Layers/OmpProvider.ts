@@ -51,9 +51,10 @@ const OMP_PRESENTATION = {
   showInteractionModeToggle: true,
   requiresNewThreadForModelChange: false,
   // omp over ACP cannot steer: a concurrent session/prompt implicitly
-  // CANCELS the running turn (acp-agent prompt()), and T3's prompt
-  // serialization otherwise holds the message until the turn ends while the
-  // timeline claims delivery. Clients must queue mid-turn sends instead.
+  // CANCELS the running turn (acp-agent prompt()). The adapter therefore
+  // stops the run before a mid-turn prompt instead of holding it behind the
+  // running one, and clients that must not destroy in-flight work queue
+  // mid-turn sends instead of pretending Enter steered.
   midTurnSteering: "queued",
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({

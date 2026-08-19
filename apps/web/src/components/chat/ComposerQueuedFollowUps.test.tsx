@@ -29,11 +29,13 @@ function makeFollowUp(
 function render(input: {
   readonly followUps: ReadonlyArray<OrchestrationQueuedFollowUp>;
   readonly isRunning?: boolean;
+  readonly sendNowStopsRun?: boolean;
 }) {
   return renderToStaticMarkup(
     createElement(ComposerQueuedFollowUps, {
       followUps: input.followUps,
       isRunning: input.isRunning ?? false,
+      sendNowStopsRun: input.sendNowStopsRun ?? false,
       onEdit: () => {},
       onRemove: () => {},
       onReorder: () => {},
@@ -86,6 +88,14 @@ describe("ComposerQueuedFollowUps", () => {
     expect(render({ followUps: [makeFollowUp()], isRunning: false })).toContain(
       'aria-label="Send now"',
     );
+  });
+
+  it("says sending now stops the run when the provider cannot steer", () => {
+    // The button used to promise a steer and then silently wait for the turn
+    // to end; on omp the server stops the run to deliver it now.
+    expect(
+      render({ followUps: [makeFollowUp()], isRunning: true, sendNowStopsRun: true }),
+    ).toContain("Stop the run and send this now");
   });
 
   it("offers edit and remove actions per follow-up", () => {

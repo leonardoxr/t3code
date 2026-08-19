@@ -86,6 +86,8 @@ interface WorkLogEntry {
    * extension is one the asset endpoint will sign.
    */
   imagePath?: string;
+  /** Full thought text for `reasoning.completed` rows. */
+  reasoningText?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -108,10 +110,21 @@ type RawThreadFeedEntry =
       readonly createdAt: string;
       readonly turnId: TurnId | null;
       readonly activity: ThreadFeedActivity;
+    }
+  | {
+      /**
+       * Thinking is prose, not a tool row: it renders inline in the flow so
+       * the reasoning is readable without a tap, the way the CLI shows it.
+       */
+      readonly type: "thinking";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly turnId: TurnId | null;
+      readonly text: string;
     };
 
 export type ThreadFeedEntry =
-  | Extract<RawThreadFeedEntry, { type: "message" }>
+  | Extract<RawThreadFeedEntry, { type: "message" | "thinking" }>
   | {
       readonly type: "working";
       readonly id: string;
@@ -407,7 +420,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     ...(taskId ? { taskId } : {}),
     label: taskLabel || activity.summary,
     tone:
-      activity.kind === "task.progress"
+      activity.kind === "task.progress" || activity.kind === "reasoning.completed"
         ? "thinking"
         : activity.tone === "approval"
           ? "info"
@@ -454,6 +467,12 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (requestKind) {
     entry.requestKind = requestKind;
+  }
+  if (activity.kind === "reasoning.completed") {
+    const reasoningText = asTrimmedString(payload?.text);
+    if (reasoningText) {
+      entry.reasoningText = reasoningText;
+    }
   }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
@@ -1169,6 +1188,13 @@ interface ThreadFeedTurnFold {
   readonly createdAt: string;
   readonly hiddenEntryIds: ReadonlySet<string>;
   readonly label: string;
+  /**
+   * The most recent turn keeps its work on screen: you just watched it happen,
+   * and collapsing it the instant it settles hides the answer's provenance.
+   * Older turns fold, so history stays quiet. The fold row itself is always
+   * emitted — it carries the duration readout either way.
+   */
+  readonly defaultExpanded: boolean;
 }
 
 function deriveThreadFeedTurnFolds(
@@ -1196,7 +1222,7 @@ function deriveThreadFeedTurnFolds(
     const turnId =
       entry.type === "message" && entry.message.role === "assistant"
         ? entry.message.turnId
-        : entry.type === "activity-group"
+        : entry.type === "activity-group" || entry.type === "thinking"
           ? entry.turnId
           : null;
     if (!turnId) {
@@ -1269,6 +1295,10 @@ function deriveThreadFeedTurnFolds(
       createdAt: firstEntry.createdAt,
       hiddenEntryIds,
       label,
+      // Only while it is genuinely the tail of the thread: once the user has
+      // sent the next message, this turn is history and must fold without
+      // popping open for the window before the new turn exists.
+      defaultExpanded: pendingUserBoundary === null && latestTurnMatches,
     });
   }
   return foldsByAnchorId;
@@ -1286,15 +1316,25 @@ export function deriveThreadFeedPresentation(
       entry.type !== "turn-fold" && entry.type !== "work-toggle" && entry.type !== "working",
   );
   const foldsByAnchorId = deriveThreadFeedTurnFolds(sourceFeed, latestTurn);
+  // `expandedTurnIds` records a deviation from the fold's default, so one
+  // toggle set drives both directions: it opens a folded old turn and closes
+  // the default-open latest turn.
+  const isFoldExpanded = (fold: ThreadFeedTurnFold): boolean =>
+    expandedTurnIds.has(fold.turnId) !== fold.defaultExpanded;
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
-    if (!expandedTurnIds.has(fold.turnId)) {
+    if (!isFoldExpanded(fold)) {
       for (const entryId of fold.hiddenEntryIds) {
         collapsedEntryIds.add(entryId);
       }
     }
   }
 
+  // The current turn shows every work row: live while it streams, and after it
+  // settles too — you just watched it happen, so hiding the command output and
+  // the diff behind "+N previous" is what made the timeline read as emptier
+  // than the CLI. Older turns condense, and then fold entirely.
+  const currentTurnId = latestTurn?.turnId ?? null;
   const result: ThreadFeedEntry[] = [];
   for (const entry of sourceFeed) {
     const fold = foldsByAnchorId.get(entry.id);
@@ -1305,11 +1345,11 @@ export function deriveThreadFeedPresentation(
         createdAt: fold.createdAt,
         turnId: fold.turnId,
         label: fold.label,
-        expanded: expandedTurnIds.has(fold.turnId),
+        expanded: isFoldExpanded(fold),
       });
     }
     if (!collapsedEntryIds.has(entry.id)) {
-      appendPresentedFeedEntry(result, entry, expandedWorkGroupIds);
+      appendPresentedFeedEntry(result, entry, expandedWorkGroupIds, currentTurnId);
     }
   }
   if (activeWorkStartedAt !== null) {
@@ -1326,6 +1366,7 @@ function appendPresentedFeedEntry(
   result: ThreadFeedEntry[],
   entry: Exclude<ThreadFeedEntry, { readonly type: "turn-fold" | "work-toggle" | "working" }>,
   expandedWorkGroupIds: ReadonlySet<string>,
+  currentTurnId: TurnId | null,
 ): void {
   if (entry.type !== "activity-group") {
     result.push(entry);
@@ -1338,7 +1379,8 @@ function appendPresentedFeedEntry(
   if (activities.length === 0) {
     return;
   }
-  if (activities.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
+  const isCurrentTurnGroup = entry.turnId !== null && entry.turnId === currentTurnId;
+  if (isCurrentTurnGroup || activities.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
     result.push({
       ...entry,
       activities,
@@ -1570,6 +1612,15 @@ export function buildThreadFeed(
           );
         })
         .map<RawThreadFeedEntry>((entry) => {
+          if (entry.reasoningText !== undefined) {
+            return {
+              type: "thinking",
+              id: entry.id,
+              createdAt: entry.createdAt,
+              turnId: entry.turnId,
+              text: entry.reasoningText,
+            };
+          }
           const summary = workEntryHeading(entry);
           const detail = workEntryPreview(entry);
           const getFullDetail = memoizeValue(() => buildWorkEntryExpandedBody(entry));
