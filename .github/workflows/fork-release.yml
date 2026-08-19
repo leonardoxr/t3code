@@ -272,6 +272,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
+          # Without this the tag lands on the default branch instead of the
+          # commit these artifacts were built from.
+          target_commitish: ${{ github.sha }}
           name: T3 Code (Fork) ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           make_latest: true
