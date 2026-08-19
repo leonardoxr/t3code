@@ -8,49 +8,43 @@ const BEHAVIORS: ReadonlyArray<FollowUpBehavior> = ["queue", "steer", "interrupt
 describe("resolveFollowUpDelivery", () => {
   it("just sends when no turn is running, whatever the setting says", () => {
     for (const behavior of BEHAVIORS) {
-      expect(
-        resolveFollowUpDelivery({ behavior, isRunning: false, override: false }),
-        behavior,
-      ).toBe("send");
-      expect(
-        resolveFollowUpDelivery({ behavior, isRunning: false, override: true }),
-        behavior,
-      ).toBe("send");
+      for (const intent of ["default", "send", "queue"] as const) {
+        expect(
+          resolveFollowUpDelivery({ behavior, isRunning: false, intent }),
+          `${behavior}/${intent}`,
+        ).toBe("send");
+      }
     }
   });
 
   it("applies the configured behavior while a turn is running", () => {
-    expect(resolveFollowUpDelivery({ behavior: "steer", isRunning: true, override: false })).toBe(
+    expect(resolveFollowUpDelivery({ behavior: "steer", isRunning: true, intent: "default" })).toBe(
       "send",
     );
-    expect(resolveFollowUpDelivery({ behavior: "queue", isRunning: true, override: false })).toBe(
+    expect(resolveFollowUpDelivery({ behavior: "queue", isRunning: true, intent: "default" })).toBe(
       "queue",
     );
     expect(
-      resolveFollowUpDelivery({ behavior: "interrupt", isRunning: true, override: false }),
+      resolveFollowUpDelivery({ behavior: "interrupt", isRunning: true, intent: "default" }),
     ).toBe("interrupt");
   });
 
-  it("flips between queueing and sending now for one message", () => {
-    // Sending immediately by default → the override queues.
-    expect(resolveFollowUpDelivery({ behavior: "steer", isRunning: true, override: true })).toBe(
-      "queue",
-    );
-    expect(
-      resolveFollowUpDelivery({ behavior: "interrupt", isRunning: true, override: true }),
-    ).toBe("queue");
-    // Queueing by default → the override sends now, and "now" steers rather
-    // than interrupts: of the two immediates it destroys no work.
-    expect(resolveFollowUpDelivery({ behavior: "queue", isRunning: true, override: true })).toBe(
-      "send",
-    );
+  it("sends now for an explicit send, whatever the setting says", () => {
+    for (const behavior of BEHAVIORS) {
+      // "Now" steers rather than interrupts: of the two immediates it destroys
+      // no work.
+      expect(resolveFollowUpDelivery({ behavior, isRunning: true, intent: "send" }), behavior).toBe(
+        "send",
+      );
+    }
   });
 
-  it("never resolves the override to the same delivery as the default", () => {
+  it("queues for an explicit queue, whatever the setting says", () => {
     for (const behavior of BEHAVIORS) {
-      const plain = resolveFollowUpDelivery({ behavior, isRunning: true, override: false });
-      const overridden = resolveFollowUpDelivery({ behavior, isRunning: true, override: true });
-      expect(overridden, behavior).not.toBe(plain);
+      expect(
+        resolveFollowUpDelivery({ behavior, isRunning: true, intent: "queue" }),
+        behavior,
+      ).toBe("queue");
     }
   });
 });

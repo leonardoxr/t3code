@@ -112,12 +112,22 @@ import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
 import {
+  type FollowUpIntent,
   getComposerPromptLengthValidationMessage,
   getComposerSubmissionValidationMessage,
   resolveFollowUpDelivery,
   submitComposerDraft,
 } from "./composerSubmission";
 import { ComposerPromptLengthValidation } from "./ComposerPromptLengthValidation";
+
+/** Text entry outside the composer that has its own claim on a submit chord. */
+const SUBMIT_CHORD_EDITABLE_SELECTOR = [
+  "input",
+  "textarea",
+  '[contenteditable="true"]',
+  '[contenteditable="plaintext-only"]',
+  '[role="textbox"]',
+].join(",");
 
 type ComposerCommandMenuPosition = {
   bottom: number;
@@ -418,8 +428,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   preserveComposerFocusOnPointerDown?: boolean;
   showSendWhileRunning?: boolean;
   followUpBehavior: FollowUpBehavior;
-  onFollowUpOverride: () => void;
-  followUpOverrideShortcutLabel: string | null;
+  onFollowUpAlternate: () => void;
+  followUpAlternateShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -450,8 +460,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         showSendWhileRunning={props.showSendWhileRunning ?? false}
         followUpBehavior={props.followUpBehavior}
-        onFollowUpOverride={props.onFollowUpOverride}
-        followUpOverrideShortcutLabel={props.followUpOverrideShortcutLabel}
+        onFollowUpAlternate={props.onFollowUpAlternate}
+        followUpAlternateShortcutLabel={props.followUpAlternateShortcutLabel}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -1864,11 +1874,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   /**
    * The one funnel every composer submit goes through, so a click and a
-   * keystroke can never diverge. `override` is the one-off chord: it flips
-   * between queueing and sending now (see `resolveFollowUpDelivery`).
+   * keystroke can never diverge. `intent` is the explicit chord or button:
+   * "send" always sends now, "queue" always queues (see
+   * `resolveFollowUpDelivery`).
    */
   const submitComposer = useCallback(
-    (event?: { preventDefault: () => void }, options?: { readonly override?: boolean }) => {
+    (event?: { preventDefault: () => void }, options?: { readonly intent?: FollowUpIntent }) => {
       if (noProviderAvailable || isSendDisabled) {
         event?.preventDefault();
         return;
@@ -1889,7 +1900,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const delivery = resolveFollowUpDelivery({
         behavior: followUpBehavior,
         isRunning: phase === "running",
-        override: options?.override === true,
+        intent: options?.intent ?? "default",
       });
       const submission = submitComposerDraft({
         prompt: promptRef.current,
@@ -2373,7 +2384,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   // ------------------------------------------------------------------
-  // Follow-up override chord (⌘⇧↵): do the opposite for one message
+  // Explicit submit chords (⌘↵ send now, ⌘⇧↵ queue)
   // ------------------------------------------------------------------
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
@@ -2384,9 +2395,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           modelPickerOpen: isComposerModelPickerOpen,
         },
       });
-      if (command !== "composer.followUpOverride") return;
-      // Claim the chord unconditionally: letting it through would insert a
-      // newline in the composer instead of submitting.
+      const intent: FollowUpIntent | null =
+        command === "composer.sendNow"
+          ? "send"
+          : command === "composer.queueFollowUp"
+            ? "queue"
+            : null;
+      if (intent === null) return;
+      // Other text boxes own mod+enter for themselves — diff and pull request
+      // comments submit on it — so a keystroke from an editable outside the
+      // composer is theirs, not ours.
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(SUBMIT_CHORD_EDITABLE_SELECTOR) !== null &&
+        target.closest("[data-chat-composer-form]") === null
+      ) {
+        return;
+      }
+      // Otherwise claim the chord unconditionally: letting it through would
+      // insert a newline in the composer instead of submitting.
       event.preventDefault();
       event.stopPropagation();
       if (
@@ -2398,7 +2426,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ) {
         return;
       }
-      submitComposer(undefined, { override: true });
+      submitComposer(undefined, { intent });
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -2583,14 +2611,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
   }, [onInterrupt]);
-  // The secondary primary-action always offers the opposite of what Enter will
-  // do, so the choice is visible without opening Settings.
-  const handleFollowUpOverridePrimaryAction = useCallback(() => {
-    submitComposer(undefined, { override: true });
-  }, [submitComposer]);
-  const followUpOverrideShortcutLabel = useMemo(
-    () => shortcutLabelForCommand(keybindings, "composer.followUpOverride"),
-    [keybindings],
+  // The secondary primary-action always offers the other action to the one
+  // Enter will take, so the choice is visible without opening Settings.
+  const followUpAlternateIntent: FollowUpIntent = followUpBehavior === "queue" ? "send" : "queue";
+  const handleFollowUpAlternatePrimaryAction = useCallback(() => {
+    submitComposer(undefined, { intent: followUpAlternateIntent });
+  }, [followUpAlternateIntent, submitComposer]);
+  const followUpAlternateShortcutLabel = useMemo(
+    () =>
+      shortcutLabelForCommand(
+        keybindings,
+        followUpAlternateIntent === "send" ? "composer.sendNow" : "composer.queueFollowUp",
+      ),
+    [followUpAlternateIntent, keybindings],
   );
   const handleImplementPlanInNewThreadPrimaryAction = useCallback(() => {
     void onImplementPlanInNewThread();
@@ -2921,9 +2954,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
-                      onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                      onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                       followUpBehavior={followUpBehavior}
-                      followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
+                      followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3219,9 +3252,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={false}
                     hasSendableContent={false}
                     preserveComposerFocusOnPointerDown
-                    onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                    onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                     followUpBehavior={followUpBehavior}
-                    followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
+                    followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3351,9 +3384,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   hasSendableContent={composerSendState.hasSendableContent}
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   showSendWhileRunning={isMobileViewport}
-                  onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                  onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                   followUpBehavior={followUpBehavior}
-                  followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
+                  followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

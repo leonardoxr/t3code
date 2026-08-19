@@ -38,8 +38,8 @@ function renderPendingActions(isRunning: boolean) {
       isPreparingWorktree: false,
       hasSendableContent: false,
       followUpBehavior: "steer",
-      onFollowUpOverride: () => {},
-      followUpOverrideShortcutLabel: "⌘⇧↵",
+      onFollowUpAlternate: () => {},
+      followUpAlternateShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -62,8 +62,8 @@ function renderStandaloneStop() {
       isPreparingWorktree: false,
       hasSendableContent: false,
       followUpBehavior: "steer",
-      onFollowUpOverride: () => {},
-      followUpOverrideShortcutLabel: "⌘⇧↵",
+      onFollowUpAlternate: () => {},
+      followUpAlternateShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -90,8 +90,8 @@ function renderRunningActions(
       isPreparingWorktree: false,
       hasSendableContent,
       followUpBehavior,
-      onFollowUpOverride: () => {},
-      followUpOverrideShortcutLabel: "⌘⇧↵",
+      onFollowUpAlternate: () => {},
+      followUpAlternateShortcutLabel: "⌘⇧↵",
       showSendWhileRunning,
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
@@ -115,8 +115,8 @@ function renderSendButton() {
       isPreparingWorktree: false,
       hasSendableContent: true,
       followUpBehavior: "steer",
-      onFollowUpOverride: () => {},
-      followUpOverrideShortcutLabel: "⌘⇧↵",
+      onFollowUpAlternate: () => {},
+      followUpAlternateShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -290,7 +290,7 @@ describe("ComposerPrimaryActions", () => {
     expect(queueing).not.toContain('aria-label="Queue follow-up"');
   });
 
-  it("hides the override action when there is nothing to send", () => {
+  it("hides the alternate action when there is nothing to send", () => {
     const markup = renderRunningActions(false, false, "steer");
     expect(markup).not.toContain('aria-label="Queue follow-up"');
   });
