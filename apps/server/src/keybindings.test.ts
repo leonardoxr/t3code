@@ -273,6 +273,40 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 
+  it.effect("backfills defaults past an entry naming a command that no longer exists", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+      // A config written before a command was renamed. It used to freeze the
+      // startup sync, so the config never received another default again — a
+      // real user lost every composer chord added after the rename.
+      yield* fs.writeFileString(
+        keybindingsConfigPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        JSON.stringify([
+          { key: "mod+j", command: "terminal.toggle" },
+          { key: "mod+shift+enter", command: "composer.followUpOverride" },
+        ]),
+      );
+
+      yield* Effect.gen(function* () {
+        const keybindings = yield* Keybindings.Keybindings;
+        yield* keybindings.syncDefaultKeybindingsOnStartup;
+      });
+
+      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+      const byCommand = new Map(persisted.map((entry) => [entry.command, entry]));
+      for (const defaultRule of Keybindings.DEFAULT_KEYBINDINGS) {
+        assert.isTrue(byCommand.has(defaultRule.command), `expected ${defaultRule.command}`);
+      }
+      // The dead rule is gone, and the user's own binding survived.
+      assert.isFalse(
+        persisted.some((entry) => String(entry.command) === "composer.followUpOverride"),
+      );
+      assert.equal(byCommand.get("terminal.toggle")?.key, "mod+j");
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
+
   it.effect(
     "upserts missing default keybindings on startup without overriding existing command rules",
     () =>

@@ -119,12 +119,24 @@ const make = Effect.gen(function* () {
     }
 
     // A turn start nothing has adopted yet is work in flight even while the
-    // session still reads idle.
+    // session still reads idle — with one exception. A provider that steers
+    // folds the request into the turn it is already running and never names a
+    // turn for it, so the pending row is never adopted and never cleared. Once
+    // some turn has completed after the request was made, that request has had
+    // its answer: treat the row as the ghost it is, or the queue stays wedged
+    // for the life of the thread.
     const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
       threadId,
     });
     if (Option.isSome(pendingTurnStart)) {
-      return;
+      const requestedAtMillis = Date.parse(pendingTurnStart.value.requestedAt);
+      const turns = yield* projectionTurnRepository.listByThreadId({ threadId });
+      const steeredIntoACompletedTurn = turns.some(
+        (turn) => turn.completedAt !== null && Date.parse(turn.completedAt) >= requestedAtMillis,
+      );
+      if (!steeredIntoACompletedTurn) {
+        return;
+      }
     }
 
     const threadShell = yield* projectionSnapshotQuery.getThreadShellById(threadId);

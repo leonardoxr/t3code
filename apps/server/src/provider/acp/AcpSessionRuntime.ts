@@ -107,6 +107,14 @@ export interface AcpSessionRuntimeStartResult {
   readonly modelConfigId: string | undefined;
 }
 
+/** Liveness snapshot for the provider-silence watchdog. */
+export interface AcpSessionActivitySnapshot {
+  /** Millis of the last inbound native frame; undefined before any frame. */
+  readonly lastInboundFrameAtMillis: number | undefined;
+  /** In-flight (non-terminal) tool calls — a live tool call is not silence. */
+  readonly openToolCallCount: number;
+}
+
 export class AcpSessionRuntime extends Context.Service<
   AcpSessionRuntime,
   {
@@ -120,6 +128,8 @@ export class AcpSessionRuntime extends Context.Service<
      * @see https://agentclientprotocol.com/protocol/schema#session/elicitation
      */
     readonly handleElicitation: EffectAcpClient.AcpClient["Service"]["handleElicitation"];
+    /** Liveness snapshot: last inbound native frame plus in-flight tool calls. */
+    readonly getActivitySnapshot: Effect.Effect<AcpSessionActivitySnapshot>;
     /**
      * Registers a handler for `fs/read_text_file`.
      * @see https://agentclientprotocol.com/protocol/schema#fs/read_text_file
@@ -316,6 +326,14 @@ export const make = (
     const activePromptFiberRef = yield* Ref.make<
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
+    // Provider-liveness stamp: any inbound native frame (session/update,
+    // permission request, elicitation) proves the agent process is alive.
+    // The silence watchdog compares against this to detect a stalled
+    // provider that retries upstream failures forever without reporting.
+    const lastInboundFrameAtRef = yield* Ref.make<number | undefined>(undefined);
+    const noteInboundFrame = Clock.currentTimeMillis.pipe(
+      Effect.flatMap((now) => Ref.set(lastInboundFrameAtRef, now)),
+    );
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
@@ -389,6 +407,7 @@ export const make = (
 
     yield* acp.handleSessionUpdate((notification) =>
       Effect.gen(function* () {
+        yield* noteInboundFrame;
         const gate = yield* Ref.get(sessionLoadGateRef);
         if (Option.isSome(gate) && gate.value.active) {
           const lastActivityAtMillis = yield* Clock.currentTimeMillis;
@@ -714,8 +733,23 @@ export const make = (
     });
 
     return {
-      handleRequestPermission: acp.handleRequestPermission,
-      handleElicitation: acp.handleElicitation,
+      // Agent-initiated requests are inbound frames too: a permission or
+      // elicitation round-trip proves the provider is alive.
+      handleRequestPermission: (handler) =>
+        acp.handleRequestPermission((request) =>
+          noteInboundFrame.pipe(Effect.andThen(handler(request))),
+        ),
+      handleElicitation: (handler) =>
+        acp.handleElicitation((request) => noteInboundFrame.pipe(Effect.andThen(handler(request)))),
+      getActivitySnapshot: Effect.all({
+        lastInboundFrameAtMillis: Ref.get(lastInboundFrameAtRef),
+        toolCalls: Ref.get(toolCallsRef),
+      }).pipe(
+        Effect.map(({ lastInboundFrameAtMillis, toolCalls }) => ({
+          lastInboundFrameAtMillis,
+          openToolCallCount: toolCalls.size,
+        })),
+      ),
       handleReadTextFile: acp.handleReadTextFile,
       handleWriteTextFile: acp.handleWriteTextFile,
       handleCreateTerminal: acp.handleCreateTerminal,

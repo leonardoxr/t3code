@@ -33,6 +33,47 @@ const claudeQuotaBody = {
   },
 };
 
+/**
+ * The same endpoint's modern shape, captured on the same plan. Note
+ * `seven_day_opus` is null while `limits` reports a Fable-scoped weekly limit of
+ * 46% — the legacy map cannot express it, and it is the binding one here.
+ */
+const claudeQuotaBodyWithLimits = {
+  ...claudeQuotaBody,
+  five_hour: { utilization: 10.0, resets_at: "2026-08-19T18:09:59.897941+00:00" },
+  seven_day: { utilization: 44.0, resets_at: "2026-08-25T19:59:59.897963+00:00" },
+  nimbus_quill: { utilization: 0.0, resets_at: null },
+  limits: [
+    {
+      kind: "session",
+      group: "session",
+      percent: 10,
+      severity: "normal",
+      resets_at: "2026-08-19T18:09:59.897941+00:00",
+      scope: null,
+      is_active: false,
+    },
+    {
+      kind: "weekly_all",
+      group: "weekly",
+      percent: 44,
+      severity: "normal",
+      resets_at: "2026-08-25T19:59:59.897963+00:00",
+      scope: null,
+      is_active: false,
+    },
+    {
+      kind: "weekly_scoped",
+      group: "weekly",
+      percent: 46,
+      severity: "normal",
+      resets_at: "2026-08-25T19:59:59.898219+00:00",
+      scope: { model: { id: null, display_name: "Fable" }, surface: null },
+      is_active: true,
+    },
+  ],
+};
+
 const codexWeeklyPrimary = {
   usedPercent: 100,
   windowDurationMins: 10080,
@@ -52,8 +93,8 @@ const codexRateLimitsResponse = {
     planType: "pro",
     rateLimitReachedType: "rate_limit_reached",
   },
-  // Declared out of order: the app-server serialises this map differently on
-  // every call, so the normaliser has to impose an order of its own.
+  // The per-model Spark bucket is a separate allowance rather than more of the
+  // plan's, so it must not reach the gauge.
   rateLimitsByLimitId: {
     codex_bengalfox: {
       limitId: "codex_bengalfox",
@@ -110,6 +151,47 @@ describe("normalizeClaudeQuota", () => {
     });
   });
 
+  it("reads the modern limits array, so a model-scoped weekly limit is not lost", () => {
+    const provider = normalizeClaudeQuota(claudeQuotaBodyWithLimits, {
+      planLabel: "max",
+      fetchedAtMs: FETCHED_AT_MS,
+    });
+
+    expect(provider.windows).toEqual([
+      {
+        id: "five_hour",
+        label: "5 hour",
+        usedPercent: 10,
+        resetsAt: Date.parse("2026-08-19T18:09:59.897Z"),
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        usedPercent: 44,
+        resetsAt: Date.parse("2026-08-25T19:59:59.897Z"),
+      },
+      {
+        id: "weekly_scoped:fable",
+        label: "Weekly (Fable)",
+        usedPercent: 46,
+        resetsAt: Date.parse("2026-08-25T19:59:59.898Z"),
+      },
+    ]);
+  });
+
+  it("does not also report the legacy buckets the limits array already covers", () => {
+    const provider = normalizeClaudeQuota(claudeQuotaBodyWithLimits, {
+      planLabel: "max",
+      fetchedAtMs: FETCHED_AT_MS,
+    });
+
+    // nimbus_quill is unprovisioned, and a second copy of the session or weekly
+    // window under a legacy id would render the same limit twice.
+    expect(provider.windows).toHaveLength(3);
+    expect(provider.windows.filter((window) => window.id === "five_hour")).toHaveLength(1);
+    expect(provider.windows.some((window) => window.id === "nimbus_quill")).toBe(false);
+  });
+
   it("renders a codenamed bucket the client has never heard of", () => {
     const provider = normalizeClaudeQuota(
       { nimbus_quill: { utilization: 4, resets_at: null } },
@@ -156,7 +238,7 @@ describe("normalizeClaudeQuota", () => {
 });
 
 describe("normalizeCodexRateLimits", () => {
-  it("maps every bucket of the live pro-plan response in a stable order", () => {
+  it("reports the plan's own quota and not the per-model Spark allowance", () => {
     const provider = normalizeCodexRateLimits(codexRateLimitsResponse, {
       fetchedAtMs: FETCHED_AT_MS,
     });
@@ -167,16 +249,32 @@ describe("normalizeCodexRateLimits", () => {
       planLabel: "pro",
       fetchedAt: FETCHED_AT_MS,
       detail: null,
-      windows: [
-        { id: "codex", label: "Weekly", usedPercent: 100, resetsAt: 1787196617000 },
-        {
-          id: "codex_bengalfox",
-          label: "GPT-5.3-Codex-Spark Weekly",
-          usedPercent: 12,
-          resetsAt: 1787196617000,
-        },
-      ],
+      windows: [{ id: "codex", label: "Weekly", usedPercent: 100, resetsAt: 1787196617000 }],
     });
+  });
+
+  it("follows rateLimits.limitId rather than assuming the bucket is called codex", () => {
+    const provider = normalizeCodexRateLimits(
+      {
+        rateLimits: {
+          ...codexRateLimitsResponse.rateLimits,
+          limitId: "codex_bengalfox",
+          limitName: "GPT-5.3-Codex-Spark",
+          primary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 1787196617 },
+        },
+        rateLimitsByLimitId: codexRateLimitsResponse.rateLimitsByLimitId,
+      },
+      { fetchedAtMs: FETCHED_AT_MS },
+    );
+
+    expect(provider.windows).toEqual([
+      {
+        id: "codex_bengalfox",
+        label: "GPT-5.3-Codex-Spark Weekly",
+        usedPercent: 12,
+        resetsAt: 1787196617000,
+      },
+    ]);
   });
 
   it("falls back to the single rateLimits view when no bucket map is sent", () => {

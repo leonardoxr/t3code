@@ -14,6 +14,46 @@ import {
 const isAcpProcessExitedError = Schema.is(EffectAcpErrors.AcpProcessExitedError);
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
+/**
+ * The readable part of a JSON-RPC error payload.
+ *
+ * An agent handler that throws something it did not classify comes back as the
+ * standard `-32603 "Internal error"`, with the only useful sentence — the
+ * thrown error's own message — tucked into `data`. Reporting `message` alone
+ * turns every one of those into an unfalsifiable "Internal error".
+ */
+function acpErrorDataDetail(data: unknown): string | null {
+  if (typeof data === "string") {
+    return data.trim().length === 0 ? null : data;
+  }
+  if (typeof data !== "object" || data === null) {
+    return null;
+  }
+  if ("details" in data && typeof data.details === "string" && data.details.trim().length > 0) {
+    return data.details;
+  }
+  try {
+    const encoded = JSON.stringify(data);
+    return encoded === undefined || encoded === "{}" ? null : encoded;
+  } catch {
+    return null;
+  }
+}
+
+const MAX_ACP_ERROR_DETAIL_CHARS = 600;
+
+function acpRequestErrorDetail(error: EffectAcpErrors.AcpRequestError): string {
+  const detail = acpErrorDataDetail(error.data);
+  if (detail === null || error.errorMessage.includes(detail)) {
+    return error.errorMessage;
+  }
+  const trimmed =
+    detail.length > MAX_ACP_ERROR_DETAIL_CHARS
+      ? `${detail.slice(0, MAX_ACP_ERROR_DETAIL_CHARS)}…`
+      : detail;
+  return `${error.errorMessage}: ${trimmed}`;
+}
+
 export function mapAcpToAdapterError(
   provider: ProviderDriverKind,
   threadId: ThreadId,
@@ -31,7 +71,7 @@ export function mapAcpToAdapterError(
     return new ProviderAdapterRequestError({
       provider,
       method,
-      detail: error.message,
+      detail: acpRequestErrorDetail(error),
       cause: error,
     });
   }

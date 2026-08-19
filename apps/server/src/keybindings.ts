@@ -481,7 +481,12 @@ const make = Effect.gen(function* () {
       }
 
       const runtimeConfig = yield* loadRuntimeCustomKeybindingsConfig();
-      if (runtimeConfig.issues.length > 0) {
+      const configIsMalformed = runtimeConfig.issues.some(
+        (issue) => issue.kind === "keybindings.malformed-config",
+      );
+      if (configIsMalformed) {
+        // The file did not parse as a whole, so every rule in it is in doubt;
+        // rewriting would throw away whatever the user meant.
         yield* Effect.logWarning(
           "skipping startup keybindings default sync because config has issues",
           {
@@ -491,6 +496,16 @@ const make = Effect.gen(function* () {
         );
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
+      }
+      if (runtimeConfig.issues.length > 0) {
+        // Individual entries failed to decode — usually a command that was
+        // renamed out from under an old config. They are already dropped from
+        // the parsed rules, and they must not block the backfill: doing so
+        // denied that config every default keybinding added from then on.
+        yield* Effect.logWarning("dropping invalid keybinding entries during default sync", {
+          path: keybindingsConfigPath,
+          issues: runtimeConfig.issues,
+        });
       }
       const customConfig = runtimeConfig.keybindings;
       const existingCommands = new Set(customConfig.map((entry) => entry.command));

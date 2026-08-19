@@ -5877,6 +5877,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   },
                 ],
               }),
+            getActivityOutput: () =>
+              Effect.succeed({
+                text: "line one\nline two",
+                truncated: false,
+                diffs: [{ path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" }],
+              }),
           },
           orchestrationEngine: {
             dispatch: () => Effect.succeed({ sequence: 7 }),
@@ -5950,6 +5956,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           snippet: "Search reached the final response.",
           messageCreatedAt: now,
         },
+      ]);
+
+      const activityOutput = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getActivityOutput]({
+            threadId: ThreadId.make("thread-1"),
+            activityId: EventId.make("activity-1"),
+          }),
+        ),
+      );
+      assert.equal(activityOutput.text, "line one\nline two");
+      assert.deepEqual(activityOutput.diffs, [
+        { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

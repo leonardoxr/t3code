@@ -35,6 +35,9 @@ interface ComposerPrimaryActionsProps {
   showSendWhileRunning?: boolean;
   /** Settings → Follow-up behavior: what Enter does while a turn is running. */
   followUpBehavior: FollowUpBehavior;
+  /** The provider cannot fold a message into a running turn, so sending now
+   * stops the run and answers the message as the next turn. */
+  sendNowStopsRun: boolean;
   /** Sends now when Enter queues, and queues when Enter sends. */
   onFollowUpAlternate: () => void;
   /** Rendered in the tooltip so the chord is discoverable. */
@@ -81,6 +84,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   preserveComposerFocusOnPointerDown = false,
   showSendWhileRunning = false,
   followUpBehavior,
+  sendNowStopsRun,
   onFollowUpAlternate,
   followUpAlternateShortcutLabel,
   onPreviousPendingQuestion,
@@ -291,12 +295,20 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   // pointer-only user can reach both. Its tooltip names the matching chord.
   const alternateAction =
     followUpBehavior === "queue"
-      ? {
-          label: "Steer the running turn",
-          icon: <NavigationIcon className="size-4 rotate-90" aria-hidden="true" />,
-          tooltip: "Steer the running turn with this message",
-          enterDoes: "Enter queues it for when the agent goes idle.",
-        }
+      ? sendNowStopsRun
+        ? {
+            label: "Stop the run and send",
+            icon: <NavigationIcon className="size-4 rotate-90" aria-hidden="true" />,
+            tooltip:
+              "This provider cannot steer, so sending now stops the run and answers this next",
+            enterDoes: "Enter queues it for when the agent goes idle.",
+          }
+        : {
+            label: "Steer the running turn",
+            icon: <NavigationIcon className="size-4 rotate-90" aria-hidden="true" />,
+            tooltip: "Steer the running turn with this message",
+            enterDoes: "Enter queues it for when the agent goes idle.",
+          }
       : {
           label: "Queue follow-up",
           icon: <ListPlusIcon className="size-4" aria-hidden="true" />,

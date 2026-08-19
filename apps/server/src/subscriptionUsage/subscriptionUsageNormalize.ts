@@ -37,12 +37,50 @@ const decodeClaudeQuotaBucket = Schema.decodeUnknownExit(ClaudeQuotaBucket);
 const ClaudeQuotaBody = Schema.Record(Schema.String, Schema.Unknown);
 const decodeClaudeQuotaBody = Schema.decodeUnknownExit(ClaudeQuotaBody);
 
+/**
+ * The modern shape of the same answer. It supersedes the flat bucket map, and it
+ * is not redundant with it: a model-scoped weekly limit (Fable's, say) appears
+ * only here, while the legacy `seven_day_opus`-style keys for it read `null`.
+ * Reading the map alone silently hid whichever limit was actually binding.
+ */
+const ClaudeQuotaLimit = Schema.Struct({
+  kind: Schema.String,
+  percent: Schema.Number,
+  resets_at: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  scope: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        model: Schema.optionalKey(
+          Schema.NullOr(
+            Schema.Struct({
+              display_name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+});
+const decodeClaudeQuotaLimits = Schema.decodeUnknownExit(Schema.Array(ClaudeQuotaLimit));
+
 /** Buckets we have names for; anything else is title-cased from its key. */
 const CLAUDE_WINDOW_LABELS: Readonly<Record<string, string>> = {
   five_hour: "5 hour",
   seven_day: "Weekly",
   seven_day_opus: "Weekly (Opus)",
   seven_day_sonnet: "Weekly (Sonnet)",
+};
+
+/** `kind` values from the `limits` array. Scoped limits name their model instead. */
+const CLAUDE_LIMIT_KIND_LABELS: Readonly<Record<string, string>> = {
+  session: "5 hour",
+  weekly_all: "Weekly",
+};
+
+/** Keys the flat map exposes that the `limits` array already covers. */
+const CLAUDE_LIMIT_KIND_IDS: Readonly<Record<string, string>> = {
+  session: "five_hour",
+  weekly_all: "seven_day",
 };
 
 /** A purchased credit balance, not a rolling window, so it is never a gauge. */
@@ -167,11 +205,70 @@ export function formatQuotaWindowDuration(minutes: number | null | undefined): s
 }
 
 /**
+ * Windows from the modern `limits` array, or null when the response predates it.
+ *
+ * A `weekly_scoped` entry is the only place a model-scoped limit appears, and it
+ * is regularly the binding one, so this is preferred over the flat bucket map
+ * rather than merged with it: the two describe the same plan, and merging would
+ * double-count the session and weekly windows under two different ids.
+ */
+function claudeWindowsFromLimits(body: Record<string, unknown>): SubscriptionUsageWindow[] | null {
+  const raw = body["limits"];
+  if (raw === undefined || raw === null) return null;
+  const decoded = decodeClaudeQuotaLimits(raw);
+  if (decoded._tag === "Failure") return null;
+
+  const windows: SubscriptionUsageWindow[] = [];
+  const seen = new Set<string>();
+  for (const limit of decoded.value) {
+    const model = trimmedOrNull(limit.scope?.model?.display_name);
+    const id =
+      CLAUDE_LIMIT_KIND_IDS[limit.kind] ??
+      (model === null ? limit.kind : `${limit.kind}:${model.toLowerCase()}`);
+    // A plan can report several scoped limits; the id keeps them apart, and a
+    // repeated id would otherwise render the same row twice.
+    if (seen.has(id)) continue;
+    const label =
+      CLAUDE_LIMIT_KIND_LABELS[limit.kind] ??
+      (model === null ? titleCaseBucketKey(limit.kind) : `Weekly (${model})`);
+    const window = makeWindow({
+      id,
+      label,
+      usedPercent: limit.percent,
+      resetsAt: epochMillisFromIso(limit.resets_at),
+    });
+    if (window === null) continue;
+    seen.add(id);
+    windows.push(window);
+  }
+  return windows.length === 0 ? null : windows;
+}
+
+/** Windows from the legacy flat bucket map, for responses without `limits`. */
+function claudeWindowsFromBuckets(body: Record<string, unknown>): SubscriptionUsageWindow[] {
+  const windows: SubscriptionUsageWindow[] = [];
+  for (const [key, value] of Object.entries(body)) {
+    if (value === null || key === CLAUDE_CREDIT_BALANCE_KEY) continue;
+    const bucket = decodeClaudeQuotaBucket(value);
+    if (bucket._tag === "Failure") continue;
+    const window = makeWindow({
+      id: key,
+      label: CLAUDE_WINDOW_LABELS[key] ?? titleCaseBucketKey(key),
+      usedPercent: bucket.value.utilization,
+      resetsAt: epochMillisFromIso(bucket.value.resets_at),
+    });
+    if (window !== null) windows.push(window);
+  }
+  return windows;
+}
+
+/**
  * Turns Anthropic's `GET /api/oauth/usage` body into the claude gauge.
  *
- * Every top-level entry carrying a numeric `utilization` becomes a window, so a
- * plan that grows a new bucket renders it without a release. Buckets a plan
- * does not have arrive as `null` and are skipped.
+ * The response carries the same plan twice: a modern `limits` array and a legacy
+ * flat map of buckets. The array wins where present because it is the only one
+ * that reports model-scoped weekly limits; the map is the fallback, and either
+ * way an unrecognised entry still renders so a new limit needs no release.
  */
 export function normalizeClaudeQuota(
   body: unknown,
@@ -186,52 +283,34 @@ export function normalizeClaudeQuota(
     );
   }
 
-  const windows: SubscriptionUsageWindow[] = [];
-  for (const [key, value] of Object.entries(decoded.value)) {
-    if (value === null || key === CLAUDE_CREDIT_BALANCE_KEY) continue;
-    const bucket = decodeClaudeQuotaBucket(value);
-    if (bucket._tag === "Failure") continue;
-    const window = makeWindow({
-      id: key,
-      label: CLAUDE_WINDOW_LABELS[key] ?? titleCaseBucketKey(key),
-      usedPercent: bucket.value.utilization,
-      resetsAt: epochMillisFromIso(bucket.value.resets_at),
-    });
-    if (window !== null) windows.push(window);
-  }
-
   return {
     provider: "claude",
     status: "ok",
     planLabel: trimmedOrNull(context.planLabel),
-    windows,
+    windows: claudeWindowsFromLimits(decoded.value) ?? claudeWindowsFromBuckets(decoded.value),
     fetchedAt: context.fetchedAtMs,
     detail: null,
   };
 }
 
 /**
- * `rateLimitsByLimitId` carries every bucket the account has. Servers that
- * predate it fill only the single `rateLimits` view, which is the same shape
- * under its own id.
+ * The one bucket that is the plan's own quota.
  *
- * The bucket map arrives in a different order on every call, so it is sorted
- * here: an unsorted list would reshuffle the rendered windows between polls.
+ * `rateLimitsByLimitId` also carries per-model buckets — a Spark allowance, say —
+ * which are a different allowance rather than more of the same one, and showing
+ * them next to the plan's makes the gauge read as though the plan had more left
+ * than it does. `rateLimits` is documented as the single-bucket view of the
+ * binding limit, so it names which entry that is; the map is consulted only to
+ * recover the richer copy of that same bucket.
  */
-function codexRateLimitBuckets(
+function codexPlanRateLimitBucket(
   response: CodexSchema.V2GetAccountRateLimitsResponse,
-): ReadonlyArray<readonly [string, CodexRateLimitBucket]> {
-  const byLimitId = response.rateLimitsByLimitId;
-  if (byLimitId) {
-    const entries = Object.entries(byLimitId);
-    if (entries.length > 0) {
-      return entries
-        .map(([key, bucket]) => [trimmedOrNull(bucket.limitId) ?? key, bucket] as const)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-    }
-  }
+): readonly [string, CodexRateLimitBucket] {
   const single = response.rateLimits;
-  return [[trimmedOrNull(single.limitId) ?? CODEX_DEFAULT_LIMIT_ID, single] as const];
+  const limitId = trimmedOrNull(single.limitId) ?? CODEX_DEFAULT_LIMIT_ID;
+  const byLimitId = response.rateLimitsByLimitId;
+  const preferred = byLimitId?.[limitId];
+  return [limitId, preferred ?? single] as const;
 }
 
 function codexWindowLabel(
@@ -248,38 +327,35 @@ function codexWindowLabel(
 /**
  * Turns `account/rateLimits/read` into the codex gauge.
  *
- * A bucket reports up to two windows; the secondary one takes an id suffix so
- * the pair stays distinguishable when clients merge windows across machines.
+ * Only the plan's own bucket is reported; see {@link codexPlanRateLimitBucket}.
+ * That bucket carries up to two windows, and the secondary one takes an id suffix
+ * so the pair stays distinguishable when clients merge windows across machines.
  */
 export function normalizeCodexRateLimits(
   response: CodexSchema.V2GetAccountRateLimitsResponse,
   context: { readonly fetchedAtMs: number },
 ): SubscriptionUsageProvider {
+  const [limitKey, bucket] = codexPlanRateLimitBucket(response);
   const windows: SubscriptionUsageWindow[] = [];
-  let planLabel: string | null = null;
-
-  for (const [limitKey, bucket] of codexRateLimitBuckets(response)) {
-    planLabel ??= trimmedOrNull(bucket.planType);
-    const slots = [
-      ["", bucket.primary],
-      [":secondary", bucket.secondary],
-    ] as const;
-    for (const [suffix, slot] of slots) {
-      if (!slot) continue;
-      const window = makeWindow({
-        id: `${limitKey}${suffix}`,
-        label: codexWindowLabel(limitKey, bucket.limitName, slot.windowDurationMins),
-        usedPercent: slot.usedPercent,
-        resetsAt: epochMillisFromSeconds(slot.resetsAt),
-      });
-      if (window !== null) windows.push(window);
-    }
+  const slots = [
+    ["", bucket.primary],
+    [":secondary", bucket.secondary],
+  ] as const;
+  for (const [suffix, slot] of slots) {
+    if (!slot) continue;
+    const window = makeWindow({
+      id: `${limitKey}${suffix}`,
+      label: codexWindowLabel(limitKey, bucket.limitName, slot.windowDurationMins),
+      usedPercent: slot.usedPercent,
+      resetsAt: epochMillisFromSeconds(slot.resetsAt),
+    });
+    if (window !== null) windows.push(window);
   }
 
   return {
     provider: "codex",
     status: "ok",
-    planLabel,
+    planLabel: trimmedOrNull(bucket.planType),
     windows,
     fetchedAt: context.fetchedAtMs,
     detail: null,

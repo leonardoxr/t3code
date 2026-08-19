@@ -28,10 +28,12 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -147,12 +149,16 @@ interface OmpSessionContext {
   readonly taskProgressFingerprints: Map<string, string>;
   /** Subtasks whose terminal task.completed already went out. */
   readonly completedTaskIds: Set<string>;
+  /** Millis when the latest sendTurn bound its prompt; silence baseline. */
+  turnStartedAtMillis: number | undefined;
+  /** True while the silence watchdog has flagged the session quiet. */
+  providerQuietMarked: boolean;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
   /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
+   * >0 means a turn is actively running, so a new sendTurn stops it first
+   * (omp cannot steer), and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
   /**
@@ -595,6 +601,61 @@ export function parseOmpTaskAsyncState(
   const asyncRecord = asyncValue as Record<string, unknown>;
   const state = readString(asyncRecord, "state");
   return state === "running" || state === "completed" || state === "failed" ? state : undefined;
+}
+
+/**
+ * How long a running turn may go without a single inbound native frame
+ * before the session is flagged quiet. The observed failure mode is omp
+ * retrying upstream 529s internally every ~60-105s without reporting;
+ * normal streaming gaps are seconds and worst-case first-token latency on
+ * huge prompts stays under ~60s, so 75s avoids false positives while
+ * flagging a real stall within ~90s.
+ */
+export const OMP_PROVIDER_QUIET_THRESHOLD_MILLIS = 75_000;
+
+export type OmpQuietTransition =
+  | { readonly _tag: "mark"; readonly quietSinceMillis: number }
+  | { readonly _tag: "clear" }
+  | { readonly _tag: "none" };
+
+/**
+ * Decides whether the silence watchdog should flag or unflag the session.
+ * Silence only counts while a turn is running with nothing legitimately
+ * outstanding: an in-flight tool call, a pending approval, or a pending
+ * user-input question all suppress it — those states wait on the tool or
+ * the human, not on the provider.
+ */
+export function resolveOmpQuietTransition(input: {
+  readonly nowMillis: number;
+  readonly turnActive: boolean;
+  readonly turnStartedAtMillis: number | undefined;
+  readonly lastInboundFrameAtMillis: number | undefined;
+  readonly openToolCallCount: number;
+  readonly pendingApprovalCount: number;
+  readonly pendingUserInputCount: number;
+  readonly quietAlreadyMarked: boolean;
+  readonly thresholdMillis: number;
+}): OmpQuietTransition {
+  if (!input.turnActive) {
+    // Settlement clears the session field through its own session update.
+    return { _tag: "none" };
+  }
+  const baselineMillis = Math.max(
+    input.turnStartedAtMillis ?? 0,
+    input.lastInboundFrameAtMillis ?? 0,
+  );
+  const eligible =
+    baselineMillis > 0 &&
+    input.openToolCallCount === 0 &&
+    input.pendingApprovalCount === 0 &&
+    input.pendingUserInputCount === 0;
+  const silent = eligible && input.nowMillis - baselineMillis >= input.thresholdMillis;
+  if (silent) {
+    return input.quietAlreadyMarked
+      ? { _tag: "none" }
+      : { _tag: "mark", quietSinceMillis: baselineMillis };
+  }
+  return input.quietAlreadyMarked ? { _tag: "clear" } : { _tag: "none" };
 }
 
 export function ompPromptSettlementBelongsToContext(input: {
@@ -1057,6 +1118,10 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
         // The turn is settling: surface any trailing thought segment before
         // the terminal event so its activity lands inside the turn.
         yield* flushReasoningBuffer(liveCtx, settleTurnId);
+        // The settlement's own session update clears providerQuietSince in
+        // the read model; only the local watchdog state needs resetting.
+        liveCtx.providerQuietMarked = false;
+        liveCtx.turnStartedAtMillis = undefined;
         // Async task jobs can outlive the turn inside omp, but the wire can
         // no longer update their rows once the turn is gone — mark them
         // backgrounded instead of leaving a live "working" state behind.
@@ -1492,6 +1557,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             taskToolSubtasks,
             taskProgressFingerprints: new Map(),
             completedTaskIds: new Set(),
+            turnStartedAtMillis: undefined,
+            providerQuietMarked: false,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
@@ -1698,6 +1765,53 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;
 
+          // Silence watchdog: flags the session quiet when a running turn has
+          // produced no inbound native frame for the threshold, and clears the
+          // flag when frames resume. Transition-only — two events per stall
+          // episode, nothing per tick.
+          yield* Effect.gen(function* () {
+            const liveCtx = sessions.get(input.threadId);
+            if (!liveCtx || liveCtx.stopped) {
+              return;
+            }
+            const snapshot = yield* liveCtx.acp.getActivitySnapshot;
+            const nowMillis = yield* Clock.currentTimeMillis;
+            const transition = resolveOmpQuietTransition({
+              nowMillis,
+              turnActive: liveCtx.activeTurnId !== undefined && liveCtx.promptsInFlight > 0,
+              turnStartedAtMillis: liveCtx.turnStartedAtMillis,
+              lastInboundFrameAtMillis: snapshot.lastInboundFrameAtMillis,
+              openToolCallCount: snapshot.openToolCallCount,
+              pendingApprovalCount: liveCtx.pendingApprovals.size,
+              pendingUserInputCount: liveCtx.pendingUserInputs.size,
+              quietAlreadyMarked: liveCtx.providerQuietMarked,
+              thresholdMillis: OMP_PROVIDER_QUIET_THRESHOLD_MILLIS,
+            });
+            if (transition._tag === "none") {
+              return;
+            }
+            liveCtx.providerQuietMarked = transition._tag === "mark";
+            yield* offerRuntimeEvent({
+              type: "session.state.changed",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: liveCtx.threadId,
+              payload: {
+                state: "running",
+                providerQuietSince:
+                  transition._tag === "mark"
+                    ? DateTime.formatIso(DateTime.makeUnsafe(transition.quietSinceMillis))
+                    : null,
+              },
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Oh My Pi silence watchdog tick failed.", { cause }),
+            ),
+            Effect.repeat(Schedule.spaced("15 seconds")),
+            Effect.forkIn(ctx.scope),
+          );
+
           yield* offerRuntimeEvent({
             type: "session.started",
             ...(yield* makeEventStamp()),
@@ -1726,25 +1840,46 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
 
     const sendTurn: OmpAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
+        // omp over ACP has no steering surface: a concurrent session/prompt
+        // makes the agent cancel the running turn anyway (acp-agent prompt()),
+        // and T3's prompt serialization would otherwise hold this message
+        // invisibly behind the running prompt — for minutes — while the
+        // timeline claims delivery. Stop the run first so the message reaches
+        // the agent now, as its own turn. Callers that must not destroy
+        // in-flight work queue instead; the provider snapshot advertises that
+        // with `midTurnSteering: "queued"`.
+        if ((sessions.get(input.threadId)?.promptsInFlight ?? 0) > 0) {
+          yield* interruptTurn(input.threadId);
+        }
         const prepared = yield* withThreadLock(
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
-            // A sendTurn while a prompt is in flight is a steer: the agent
-            // folds the new prompt into the ongoing work, so the active turn
-            // id is reused instead of opening a new turn.
-            const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
-            const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+            // The stop above settles every prompt slot. Anything still in
+            // flight means it could not (session churn mid-stop), and sending
+            // now would queue behind that prompt instead of reaching the
+            // agent — the exact silent hold this path exists to prevent.
+            if (ctx.promptsInFlight > 0) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "Oh My Pi is still finishing the previous turn.",
+              });
+            }
+            const turnId = TurnId.make(yield* randomUUIDv4);
             // Count this prompt immediately so a superseded in-flight prompt
             // resolving from here on does not settle the turn; decremented on
             // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
+            // A prompt resets the silence baseline: the provider legitimately
+            // owes nothing until it starts working.
+            ctx.turnStartedAtMillis = yield* Clock.currentTimeMillis;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
             ctx.session = {
               ...ctx.session,
-              status: steeringTurnId === undefined ? "connecting" : "running",
+              status: "connecting",
               activeTurnId: turnId,
               updatedAt: yield* nowIso,
             };
@@ -1834,18 +1969,16 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                   detail: "Oh My Pi prompt was interrupted during preparation.",
                 });
               }
-              if (steeringTurnId === undefined) {
-                ctx.lastPlanFingerprint = undefined;
-                // A fresh turn must not inherit a stale thought segment from
-                // an interrupted predecessor.
-                ctx.reasoningItemId = undefined;
-                ctx.reasoningText = "";
-                // Task bookkeeping is per-turn: a fresh turn's task tool calls
-                // get new ids, and stale entries would only leak.
-                ctx.taskToolSubtasks.clear();
-                ctx.taskProgressFingerprints.clear();
-                ctx.completedTaskIds.clear();
-              }
+              ctx.lastPlanFingerprint = undefined;
+              // A fresh turn must not inherit a stale thought segment from
+              // an interrupted predecessor.
+              ctx.reasoningItemId = undefined;
+              ctx.reasoningText = "";
+              // Task bookkeeping is per-turn: a fresh turn's task tool calls
+              // get new ids, and stale entries would only leak.
+              ctx.taskToolSubtasks.clear();
+              ctx.taskProgressFingerprints.clear();
+              ctx.completedTaskIds.clear();
               ctx.session = {
                 ...ctx.session,
                 status: "running",
@@ -1854,16 +1987,14 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 ...(displayModel ? { model: displayModel } : {}),
               };
 
-              if (steeringTurnId === undefined) {
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: displayModel ? { model: displayModel } : {},
-                });
-              }
+              yield* offerRuntimeEvent({
+                type: "turn.started",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: displayModel ? { model: displayModel } : {},
+              });
 
               return {
                 acp: ctx.acp,
@@ -1980,9 +2111,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               const remainingPrompts = Math.max(0, ctx.promptsInFlight - 1);
               ctx.promptsInFlight = remainingPrompts;
 
-              // Only the last remaining prompt settles the turn. A steer-
-              // superseded prompt resolving while another is in flight or
-              // pending must leave the merged turn running.
+              // Only the last remaining prompt settles the turn: a prompt
+              // superseded by a stop-and-send resolving while the replacement
+              // is in flight must not close the turn that replaced it.
               if (
                 remainingPrompts === 0 &&
                 ctx.activeTurnId === prepared.turnId &&

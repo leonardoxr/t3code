@@ -47,4 +47,55 @@ describe("resolveFollowUpDelivery", () => {
       ).toBe("queue");
     }
   });
+
+  it("keeps Enter off the destructive path when the transport cannot steer", () => {
+    // omp over ACP: a mid-turn prompt makes the agent cancel the running turn,
+    // so Enter under "steer" queues instead of quietly stopping the run.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("queue");
+    // The explicit send-now chord still means now: the server stops the run
+    // and answers this as the next turn, which is this transport's fastest
+    // honest delivery. Silently queueing it made the chord look broken.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "send",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("send");
+    // Interrupt still works: stop + fresh prompt needs no steering.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "interrupt",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("interrupt");
+    // Idle threads send normally — nothing to steer behind.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: false,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("send");
+    // Native steering is untouched.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "native",
+      }),
+    ).toBe("send");
+  });
 });

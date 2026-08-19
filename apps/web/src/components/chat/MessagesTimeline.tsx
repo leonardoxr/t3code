@@ -47,6 +47,7 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
+import { useActivityOutput } from "../../state/queries";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -161,6 +162,8 @@ interface TimelineRowActivityState {
   latestTurnId: TurnId | null;
   /** Current plan step label for the working row, when the turn has a plan. */
   workingStepLabel: string | null;
+  /** Last provider activity when the silence watchdog flagged the session quiet. */
+  providerQuietSince: string | null;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -214,6 +217,7 @@ interface MessagesTimelineProps {
   onOpenAgents?: () => void;
   isWorking: boolean;
   workingStepLabel?: string | null;
+  providerQuietSince?: string | null;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
@@ -258,6 +262,7 @@ interface MessagesTimelineProps {
 export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   workingStepLabel = null,
+  providerQuietSince = null,
   activeTurnInProgress,
   activeTurnStartedAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
@@ -550,8 +555,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       latestTurnId: latestTurn?.turnId ?? null,
       workingStepLabel,
+      providerQuietSince,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestTurn?.turnId, workingStepLabel],
+    [
+      activeTurnInProgress,
+      isRevertingCheckpoint,
+      isWorking,
+      latestTurn?.turnId,
+      workingStepLabel,
+      providerQuietSince,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1333,7 +1346,26 @@ const ThinkingTimelineRow = memo(function ThinkingTimelineRow({
 });
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { workingStepLabel } = use(TimelineRowActivityCtx);
+  const { workingStepLabel, providerQuietSince } = use(TimelineRowActivityCtx);
+  if (providerQuietSince) {
+    // The provider has sent nothing for the silence threshold: stop claiming
+    // progress and state what is actually known. Stop stays reachable via
+    // the composer's stop-generation button.
+    return (
+      <div className="py-0.5 pl-1.5">
+        <div className="flex min-w-0 items-center gap-2 pt-1 text-[11px] text-warning tabular-nums">
+          <CircleAlertIcon className="size-3 shrink-0" aria-hidden />
+          <span className="shrink-0">
+            No output from the provider for <WorkingTimer createdAt={providerQuietSince} />
+          </span>
+          <span className="min-w-0 truncate text-secondary-label">
+            · last activity {formatTimeOfDay(providerQuietSince)} — still waiting; you can stop the
+            turn
+          </span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="py-0.5 pl-1.5">
       <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
@@ -1992,6 +2024,14 @@ function formatWorkingTimerNow(startIso: string): string {
   return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0s";
 }
 
+/** Wall-clock label for the quiet row's "last activity" timestamp. */
+function formatTimeOfDay(iso: string): string {
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime())
+    ? iso
+    : parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 type WorkEntryIconName =
   | "bot"
   | "bug"
@@ -2126,7 +2166,7 @@ function workEntryRawCommand(
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
-  options?: { omitFullOutput?: boolean },
+  options?: { fullOutputText?: string; omitFullOutput?: boolean },
 ): string | null {
   const blocks: string[] = [];
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
@@ -2150,9 +2190,10 @@ function buildToolCallExpandedBody(
   } else if (workEntry.command?.trim()) {
     blocks.push(workEntry.command.trim());
   }
-  // The capped multi-line output supersedes the one-line detail summary.
-  if (workEntry.fullOutputText?.trim() && !options?.omitFullOutput) {
-    blocks.push(workEntry.fullOutputText.trim());
+  // Fetched output supersedes the one-line detail summary, which is also what
+  // the row shows while that fetch is still in flight.
+  if (options?.fullOutputText?.trim() && !options.omitFullOutput) {
+    blocks.push(options.fullOutputText.trim());
   } else if (workEntry.detail?.trim()) {
     blocks.push(workEntry.detail.trim());
   }
@@ -2436,37 +2477,30 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       : rawPreview;
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const toolCode = workEntry.toolInfo?.code;
+  // Output and diffs are not on the wire — a tool row asks for its own body the
+  // first time it is expanded, and the query caches it per activity.
+  const output = useActivityOutput({
+    environmentId: ctx.activeThreadEnvironmentId,
+    threadId: rowThreadId,
+    activityId: workEntry.id,
+    enabled: expanded && workLogEntryIsToolLike(workEntry),
+  });
+  const fullOutputText = output.data?.text ?? undefined;
+  const diffs = output.data?.diffs;
   // LSP results are markdown (hover docs, fenced signatures); render them
   // through ChatMarkdown instead of the monospace <pre>.
-  const renderResultAsMarkdown =
-    workEntry.toolInfo?.name === "lsp" && workEntry.fullOutputText !== undefined;
+  const renderResultAsMarkdown = workEntry.toolInfo?.name === "lsp" && fullOutputText !== undefined;
   const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot, {
+    ...(fullOutputText !== undefined ? { fullOutputText } : {}),
     omitFullOutput: renderResultAsMarkdown,
   });
-  const diffs = workEntry.diffs ?? [];
-  const hasDiffs = diffs.length > 0;
-  // Small results show themselves. A handful of output lines or a one-file
-  // edit is the payload of the row, and hiding it behind a click is what made
-  // the timeline read as empty; anything bigger stays behind the disclosure so
-  // long threads keep their shape (and shiki stays lazy).
-  const inlineOutputText =
-    !renderResultAsMarkdown && workEntry.fullOutputText !== undefined
-      ? workEntry.fullOutputText
-      : undefined;
-  const autoShowOutput =
-    inlineOutputText !== undefined &&
-    inlineOutputText.length <= 600 &&
-    inlineOutputText.split("\n").length <= 8;
-  const autoShowDiffs =
-    hasDiffs &&
-    diffs.length <= 2 &&
-    diffs.reduce(
-      (lines, diff) =>
-        lines + diff.newText.split("\n").length + (diff.oldText?.split("\n").length ?? 0),
-      0,
-    ) <= 80;
+  const hasDiffs = (diffs?.length ?? 0) > 0;
   const canExpand =
-    expandedBody !== null || hasDiffs || toolCode !== undefined || renderResultAsMarkdown;
+    expandedBody !== null ||
+    hasDiffs ||
+    toolCode !== undefined ||
+    renderResultAsMarkdown ||
+    workLogEntryIsToolLike(workEntry);
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2593,26 +2627,6 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       {workEntry.imagePath && rowThreadId ? (
         <WorkEntryInlineImage imagePath={workEntry.imagePath} threadId={rowThreadId} />
       ) : null}
-      {/* Auto-shown payload: visible without a click when it is small enough
-          to belong in the flow. The disclosure below still holds everything. */}
-      {!expanded && (autoShowOutput || autoShowDiffs) ? (
-        <div
-          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
-          onClick={stopRowToggle}
-          onPointerDown={stopRowToggle}
-        >
-          {autoShowOutput && inlineOutputText ? (
-            <pre className={toolCallExpandedBodyClassName}>{inlineOutputText}</pre>
-          ) : null}
-          {autoShowDiffs ? (
-            <WorkEntryDiffSection
-              diffs={diffs}
-              resolvedTheme={ctx.resolvedTheme}
-              workspaceRoot={workspaceRoot}
-            />
-          ) : null}
-        </div>
-      ) : null}
       {expanded && canExpand ? (
         <div
           className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
@@ -2631,16 +2645,16 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           {expandedBody ? (
             <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
           ) : null}
-          {renderResultAsMarkdown && workEntry.fullOutputText ? (
+          {renderResultAsMarkdown && fullOutputText ? (
             <ChatMarkdown
-              text={workEntry.fullOutputText}
+              text={fullOutputText}
               cwd={ctx.markdownCwd}
               threadRef={ctx.threadRef ?? undefined}
               skills={ctx.skills}
               className="mt-1 text-secondary-label text-[12px]"
             />
           ) : null}
-          {hasDiffs ? (
+          {diffs && diffs.length > 0 ? (
             <WorkEntryDiffSection
               diffs={diffs}
               resolvedTheme={ctx.resolvedTheme}

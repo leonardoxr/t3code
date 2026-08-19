@@ -4,8 +4,9 @@ import type { FollowUpBehavior } from "@t3tools/contracts/settings";
 /**
  * What a submit does with the draft.
  *
- * - `send` dispatches a turn. While one is running the provider folds it into
- *   that turn, which is what "steer" means.
+ * - `send` dispatches a turn. While one is running a provider that can steer
+ *   folds it into that turn; one that cannot stops the run and answers this
+ *   message as the next turn. Either way the agent has it within a second.
  * - `queue` parks it until the thread is genuinely idle.
  * - `interrupt` stops the running turn and runs this message next.
  */
@@ -26,11 +27,19 @@ export type FollowUpIntent = "default" | "send" | "queue";
  * With no turn running there is nothing to queue behind or interrupt, so every
  * intent just sends. While one runs, an explicit `send` steers rather than
  * interrupts: of the two immediates it is the one that destroys no work.
+ *
+ * On a provider whose transport cannot steer (`midTurnSteering: "queued"`)
+ * there is no such immediate-and-lossless option, so the two paths split by
+ * what the user asked for: Enter under the `steer` setting queues (nobody
+ * asked to destroy the run), while the explicit send-now chord still sends —
+ * the server stops the run and delivers the message as the next turn, which
+ * is the fastest honest delivery that transport has.
  */
 export function resolveFollowUpDelivery(input: {
   readonly behavior: FollowUpBehavior;
   readonly isRunning: boolean;
   readonly intent: FollowUpIntent;
+  readonly midTurnSteering?: "native" | "queued";
 }): FollowUpDelivery {
   if (!input.isRunning || input.intent === "send") {
     return "send";
@@ -38,7 +47,10 @@ export function resolveFollowUpDelivery(input: {
   if (input.intent === "queue" || input.behavior === "queue") {
     return "queue";
   }
-  return input.behavior === "interrupt" ? "interrupt" : "send";
+  if (input.behavior === "interrupt") {
+    return "interrupt";
+  }
+  return input.midTurnSteering === "queued" ? "queue" : "send";
 }
 
 type ComposerSubmitEvent = { preventDefault: () => void };

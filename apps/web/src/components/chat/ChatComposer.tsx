@@ -226,7 +226,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
-import { getProviderInteractionModeToggle } from "../../providerModels";
+import { getProviderInteractionModeToggle, getProviderMidTurnSteering } from "../../providerModels";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -429,6 +429,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   preserveComposerFocusOnPointerDown?: boolean;
   showSendWhileRunning?: boolean;
   followUpBehavior: FollowUpBehavior;
+  sendNowStopsRun: boolean;
   onFollowUpAlternate: () => void;
   followUpAlternateShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
@@ -461,6 +462,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         showSendWhileRunning={props.showSendWhileRunning ?? false}
         followUpBehavior={props.followUpBehavior}
+        sendNowStopsRun={props.sendNowStopsRun}
         onFollowUpAlternate={props.onFollowUpAlternate}
         followUpAlternateShortcutLabel={props.followUpAlternateShortcutLabel}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
@@ -926,7 +928,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ChatView forces the effective mode to "default", so hiding the toggle
   // can't trap anyone in plan mode.
   const planModeUiEnabled = settings.planModeEnabled;
-  const followUpBehavior = settings.followUpBehavior;
+  const configuredFollowUpBehavior = settings.followUpBehavior;
+  const midTurnSteering = getProviderMidTurnSteering(providerStatuses, selectedProvider);
+  // A provider that cannot steer turns Enter's "steer" into "queue": nobody
+  // asked to destroy the running turn by pressing Enter. Sending now stays
+  // reachable and immediate — the server stops the run and answers the
+  // message next — and every affordance says so.
+  const sendNowStopsRun = midTurnSteering === "queued";
+  const followUpBehavior =
+    configuredFollowUpBehavior === "steer" && sendNowStopsRun
+      ? "queue"
+      : configuredFollowUpBehavior;
   const composerProviderControls = useMemo(
     () => ({
       showInteractionModeToggle:
@@ -1902,6 +1914,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         behavior: followUpBehavior,
         isRunning: phase === "running",
         intent: options?.intent ?? "default",
+        midTurnSteering,
       });
       const submission = submitComposerDraft({
         prompt: promptRef.current,
@@ -1937,6 +1950,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activePendingProgress,
       blurMobileComposerAfterSend,
       followUpBehavior,
+      midTurnSteering,
       isSendDisabled,
       noProviderAvailable,
       onInterrupt,
@@ -2957,6 +2971,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       preserveComposerFocusOnPointerDown
                       onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                       followUpBehavior={followUpBehavior}
+                      sendNowStopsRun={sendNowStopsRun}
                       followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
@@ -3062,6 +3077,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               <ComposerQueuedFollowUps
                 followUps={queuedFollowUps}
                 isRunning={phase === "running"}
+                sendNowStopsRun={sendNowStopsRun}
                 onEdit={onEditQueuedFollowUp}
                 onRemove={onRemoveQueuedFollowUp}
                 onReorder={onReorderQueuedFollowUp}
@@ -3255,6 +3271,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     preserveComposerFocusOnPointerDown
                     onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                     followUpBehavior={followUpBehavior}
+                    sendNowStopsRun={sendNowStopsRun}
                     followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
@@ -3387,6 +3404,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   showSendWhileRunning={isMobileViewport}
                   onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                   followUpBehavior={followUpBehavior}
+                  sendNowStopsRun={sendNowStopsRun}
                   followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}

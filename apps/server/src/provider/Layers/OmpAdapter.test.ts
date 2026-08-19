@@ -28,6 +28,8 @@ import {
 
 import { ServerConfig } from "../../config.ts";
 import type { AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
+import { ChildProcessSpawner } from "effect/unstable/process";
+import { makeOmpAcpRuntime } from "../acp/OmpAcpSupport.ts";
 import {
   enrichOmpToolCallFiles,
   formatOmpRateLimitTurnError,
@@ -37,6 +39,7 @@ import {
   parseOmpTaskToolCall,
   parseOmpTaskToolProgress,
   parseOmpTaskToolResults,
+  resolveOmpQuietTransition,
   resolveOmpRequestedModeId,
 } from "./OmpAdapter.ts";
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
@@ -300,6 +303,69 @@ it("parseOmpTaskToolCall maps subagent task tool args to synthesized subtasks", 
   );
 });
 
+it("resolveOmpQuietTransition flags sustained silence and nothing else", () => {
+  const base = {
+    nowMillis: 200_000,
+    turnActive: true,
+    turnStartedAtMillis: 10_000,
+    lastInboundFrameAtMillis: 100_000,
+    openToolCallCount: 0,
+    pendingApprovalCount: 0,
+    pendingUserInputCount: 0,
+    quietAlreadyMarked: false,
+    thresholdMillis: 75_000,
+  };
+
+  // 100s without a frame → quiet, anchored at the last observed activity.
+  assert.deepEqual(resolveOmpQuietTransition(base), { _tag: "mark", quietSinceMillis: 100_000 });
+  // Already flagged → no repeat event.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, quietAlreadyMarked: true }), {
+    _tag: "none",
+  });
+  // Below the threshold → nothing.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, nowMillis: 174_999 }), { _tag: "none" });
+  // A frame arriving after the flag → clear.
+  assert.deepEqual(
+    resolveOmpQuietTransition({
+      ...base,
+      quietAlreadyMarked: true,
+      lastInboundFrameAtMillis: 190_000,
+    }),
+    { _tag: "clear" },
+  );
+
+  // A long-running tool call is not provider silence.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, openToolCallCount: 1 }), {
+    _tag: "none",
+  });
+  assert.deepEqual(
+    resolveOmpQuietTransition({ ...base, openToolCallCount: 1, quietAlreadyMarked: true }),
+    { _tag: "clear" },
+  );
+  // Waiting on the human (approval / user input) is not provider silence.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, pendingApprovalCount: 1 }), {
+    _tag: "none",
+  });
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, pendingUserInputCount: 1 }), {
+    _tag: "none",
+  });
+
+  // No frames yet: the prompt dispatch time is the baseline.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, lastInboundFrameAtMillis: undefined }), {
+    _tag: "mark",
+    quietSinceMillis: 10_000,
+  });
+  // A prompt newer than the last frame resets the baseline (steer).
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, turnStartedAtMillis: 150_000 }), {
+    _tag: "none",
+  });
+  // No turn running → settlement owns the clear; the watchdog stays silent.
+  assert.deepEqual(
+    resolveOmpQuietTransition({ ...base, turnActive: false, quietAlreadyMarked: true }),
+    { _tag: "none" },
+  );
+});
+
 it("parseOmpTaskToolProgress and parseOmpTaskToolResults read streamed task details", () => {
   const baseCall = {
     toolCallId: "tool-task-2",
@@ -393,6 +459,33 @@ it("parseOmpTaskToolProgress and parseOmpTaskToolResults read streamed task deta
 });
 
 it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
+  it.effect("stamps inbound native frames for the silence watchdog", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* Effect.promise(() => makeMockOmpWrapper());
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const runtime = yield* makeOmpAcpRuntime({
+        ompSettings: decodeOmpSettings({ binaryPath: wrapperPath }),
+        environment: process.env,
+        childProcessSpawner,
+        cwd: process.cwd(),
+        clientInfo: { name: "t3-omp-test", version: "0.0.0" },
+      }).pipe(Effect.orDie);
+
+      const before = yield* runtime.getActivitySnapshot;
+      assert.isUndefined(before.lastInboundFrameAtMillis);
+      assert.equal(before.openToolCallCount, 0);
+
+      yield* runtime.start().pipe(Effect.orDie);
+      // The prompt settles only after the mock streamed its message frames,
+      // so the snapshot deterministically reflects inbound activity.
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "hello" }] }).pipe(Effect.orDie);
+
+      const after = yield* runtime.getActivitySnapshot;
+      assert.isDefined(after.lastInboundFrameAtMillis);
+      assert.equal(after.openToolCallCount, 0);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("omp-mock-thread");
@@ -1004,6 +1097,93 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("stops the running turn for a mid-turn prompt instead of trailing behind it", () =>
+    Effect.gen(function* () {
+      // omp over ACP cannot steer, and T3 serializes prompts: without stopping
+      // the run first, this second prompt would sit behind the hanging one —
+      // invisible to the agent — while the timeline claimed delivery.
+      const threadId = ThreadId.make("omp-mid-turn-send-stops-the-run");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "omp-acp-mid-turn-send-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockOmpWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const firstTurnStarted = yield* Deferred.make<TurnId>();
+      const twoTurnsCompleted = yield* Deferred.make<void>();
+      const completedCountRef = yield* Ref.make(0);
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+            return;
+          }
+          if (event.type !== "turn.completed") {
+            return;
+          }
+          const completedCount = yield* Ref.updateAndGet(completedCountRef, (count) => count + 1);
+          if (completedCount === 2) {
+            yield* Deferred.succeed(twoTurnsCompleted, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const hangingTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "hang forever", attachments: [] })
+        .pipe(Effect.forkChild);
+      const hangingTurnId = yield* Deferred.await(firstTurnStarted).pipe(
+        Effect.timeout("2 seconds"),
+      );
+      // The prompt has to be in flight for this to be a mid-turn send at all.
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+
+      const midTurnSend = yield* adapter
+        .sendTurn({ threadId, input: "actually, do 15 instead", attachments: [] })
+        .pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(hangingTurnFiber).pipe(Effect.timeout("2 seconds"));
+      yield* Deferred.await(twoTurnsCompleted).pipe(Effect.timeout("2 seconds"));
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.notEqual(String(midTurnSend.turnId), String(hangingTurnId));
+      assert.deepEqual(
+        turnCompletedEvents.map((event) => [String(event.turnId), event.payload.state]),
+        [
+          [String(hangingTurnId), "cancelled"],
+          [String(midTurnSend.turnId), "completed"],
+        ],
+      );
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("drops late ACP notifications after a turn is cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("omp-drop-late-cancelled-notifications");
@@ -1192,6 +1372,55 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
       if (failedTurnCompleted?.type === "turn.completed") {
         assert.equal(failedTurnCompleted.payload.state, "failed");
         assert.isString(failedTurnCompleted.payload.errorMessage);
+      }
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reports what the agent hid behind a generic internal error", () =>
+    Effect.gen(function* () {
+      // omp answers an unclassified handler throw with `-32603 "Internal
+      // error"` and the real sentence in `data.details`. Surfacing only the
+      // message left a failed turn saying nothing an operator could act on.
+      const threadId = ThreadId.make("omp-prompt-internal-error-details");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockOmpWrapper({
+          T3_ACP_PROMPT_ERROR_DETAILS: "ACP session closed before queued prompt could run",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({ threadId, input: "fail prompt", attachments: [] }),
+      );
+      const failedTurnCompleted = runtimeEvents.find(
+        (event) => event.type === "turn.completed" && event.threadId === threadId,
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.include(error.message, "ACP session closed before queued prompt could run");
+      assert.equal(failedTurnCompleted?.type, "turn.completed");
+      if (failedTurnCompleted?.type === "turn.completed") {
+        assert.equal(failedTurnCompleted.payload.state, "failed");
+        assert.include(
+          String(failedTurnCompleted.payload.errorMessage),
+          "ACP session closed before queued prompt could run",
+        );
       }
 
       yield* Fiber.interrupt(runtimeEventsFiber);

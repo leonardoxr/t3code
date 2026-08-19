@@ -50,6 +50,12 @@ const OMP_PRESENTATION = {
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
   requiresNewThreadForModelChange: false,
+  // omp over ACP cannot steer: a concurrent session/prompt implicitly
+  // CANCELS the running turn (acp-agent prompt()). The adapter therefore
+  // stops the run before a mid-turn prompt instead of holding it behind the
+  // running one, and clients that must not destroy in-flight work queue
+  // mid-turn sends instead of pretending Enter steered.
+  midTurnSteering: "queued",
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],

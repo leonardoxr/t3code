@@ -31,13 +31,6 @@ export interface PendingUserInputDraftAnswer {
   readonly customAnswer?: string;
 }
 
-/** Inline per-file diff preserved from ACP tool content on `tool.completed`. */
-export interface ThreadFeedDiff {
-  readonly path: string;
-  readonly oldText: string | null;
-  readonly newText: string;
-}
-
 export interface ThreadFeedActivity {
   readonly id: string;
   readonly createdAt: string;
@@ -67,31 +60,9 @@ export interface ThreadFeedActivity {
    * tool call. The row renders it inline from a signed workspace-file asset URL.
    */
   readonly imagePath?: string;
-  /**
-   * Tool output short enough to belong in the flow — the row shows it under
-   * itself with no tap, the way the CLI does. Set only when the text clears
-   * INLINE_OUTPUT_MAX_*; anything larger stays behind the disclosure.
-   */
-  readonly inlineOutput?: string;
-  /**
-   * Per-file diffs small enough (INLINE_DIFF_MAX_*) to render under the row
-   * without a tap.
-   */
-  readonly inlineDiffs?: ReadonlyArray<ThreadFeedDiff>;
 }
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
-
-/**
- * A handful of output lines or a one-file edit is the payload of the row, and
- * hiding it behind a tap is what made the timeline read as emptier than the
- * CLI. Thresholds mirror the web timeline so both surfaces inline the same
- * rows.
- */
-const INLINE_OUTPUT_MAX_CHARS = 600;
-const INLINE_OUTPUT_MAX_LINES = 8;
-const INLINE_DIFF_MAX_FILES = 2;
-const INLINE_DIFF_MAX_LINES = 80;
 
 type WorkLogToolLifecycleStatus = "inProgress" | "completed" | "failed" | "declined" | "stopped";
 
@@ -117,10 +88,6 @@ interface WorkLogEntry {
   imagePath?: string;
   /** Full thought text for `reasoning.completed` rows. */
   reasoningText?: string;
-  /** Capped multi-line tool output from `data.rawOutput.fullText`. */
-  fullOutputText?: string;
-  /** Inline diffs from `data.diffs` on completed file-change tools. */
-  diffs?: ReadonlyArray<ThreadFeedDiff>;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -507,15 +474,6 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       entry.reasoningText = reasoningText;
     }
   }
-  const toolPayloadData = asRecord(payload?.data);
-  const fullOutputText = asTrimmedString(asRecord(toolPayloadData?.rawOutput)?.fullText);
-  if (fullOutputText) {
-    entry.fullOutputText = fullOutputText;
-  }
-  const diffs = extractWorkLogDiffs(toolPayloadData?.diffs);
-  if (diffs) {
-    entry.diffs = diffs;
-  }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
     toolLifecycleStatus = "completed";
@@ -594,10 +552,6 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
-  // The completed row is where the server attaches the full output and the
-  // diffs; a merge must never drop them back to the in-flight row's slim data.
-  const fullOutputText = next.fullOutputText ?? previous.fullOutputText;
-  const diffs = next.diffs ?? previous.diffs;
   return {
     ...previous,
     ...next,
@@ -612,8 +566,6 @@ function mergeDerivedWorkLogEntries(
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolLifecycleStatus ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
-    ...(fullOutputText ? { fullOutputText } : {}),
-    ...(diffs ? { diffs } : {}),
   };
 }
 
@@ -757,9 +709,7 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
     appendUniqueBlock(`MCP call\n${JSON.stringify(entry.toolData, null, 2)}`);
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
-  // The capped multi-line output supersedes the one-line detail summary: the
-  // inline preview clamps long lines, so the disclosure has to hold the rest.
-  appendUniqueBlock(entry.fullOutputText ?? entry.detail);
+  appendUniqueBlock(entry.detail);
   if ((entry.changedFiles?.length ?? 0) > 0) {
     appendUniqueBlock(entry.changedFiles!.join("\n"));
   }
@@ -771,46 +721,9 @@ function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
   return (
     (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) ||
     Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
-    Boolean((entry.fullOutputText ?? entry.detail)?.trim()) ||
+    Boolean(entry.detail?.trim()) ||
     (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)
   );
-}
-
-/**
- * Lines a diff side contributes to the inline block. An absent or empty side
- * (a created file has no old text) renders nothing, so it counts as zero
- * instead of the single empty line `"".split("\n")` reports. Shared by the
- * inline threshold here and by the row's rendered-height math.
- */
-export function inlineDiffSideLineCount(text: string | null): number {
-  return text === null || text.length === 0 ? 0 : text.split("\n").length;
-}
-
-/** The part of a work entry that renders under its row without a tap. */
-function inlineWorkEntryPayload(
-  entry: WorkLogEntry,
-): Pick<ThreadFeedActivity, "inlineOutput" | "inlineDiffs"> {
-  const payload: { inlineOutput?: string; inlineDiffs?: ReadonlyArray<ThreadFeedDiff> } = {};
-  const { fullOutputText, diffs } = entry;
-  if (
-    fullOutputText !== undefined &&
-    fullOutputText.length <= INLINE_OUTPUT_MAX_CHARS &&
-    fullOutputText.split("\n").length <= INLINE_OUTPUT_MAX_LINES
-  ) {
-    payload.inlineOutput = fullOutputText;
-  }
-  if (
-    diffs !== undefined &&
-    diffs.length <= INLINE_DIFF_MAX_FILES &&
-    diffs.reduce(
-      (lines, diff) =>
-        lines + inlineDiffSideLineCount(diff.oldText) + inlineDiffSideLineCount(diff.newText),
-      0,
-    ) <= INLINE_DIFF_MAX_LINES
-  ) {
-    payload.inlineDiffs = diffs;
-  }
-  return payload;
 }
 
 function memoizeValue<T>(build: () => T): () => T {
@@ -1173,30 +1086,6 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   const seen = new Set<string>();
   collectChangedFiles(asRecord(payload?.data), changedFiles, seen, 0);
   return changedFiles;
-}
-
-/**
- * `data.diffs` on completed file-change tools: the server already caps file
- * count and per-side size, so this only guards the shape.
- */
-function extractWorkLogDiffs(value: unknown): ReadonlyArray<ThreadFeedDiff> | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const diffs: ThreadFeedDiff[] = [];
-  for (const entryValue of value) {
-    const entry = asRecord(entryValue);
-    const path = asTrimmedString(entry?.path);
-    if (!entry || !path || typeof entry.newText !== "string") {
-      continue;
-    }
-    diffs.push({
-      path,
-      oldText: typeof entry.oldText === "string" ? entry.oldText : null,
-      newText: entry.newText,
-    });
-  }
-  return diffs.length > 0 ? diffs : undefined;
 }
 
 function compareActivityLifecycleRank(kind: string): number {
@@ -1760,7 +1649,6 @@ export function buildThreadFeed(
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
               ...(entry.imagePath ? { imagePath: entry.imagePath } : {}),
-              ...inlineWorkEntryPayload(entry),
             },
           };
         }),

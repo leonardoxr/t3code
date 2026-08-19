@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   CheckpointRef,
   IsoDateTime,
+  EventId,
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
@@ -45,6 +46,7 @@ import {
 } from "../../persistence/Errors.ts";
 import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { extractActivityOutput } from "../ActivityPayloadProjection.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
@@ -146,6 +148,10 @@ const ProjectIdLookupInput = Schema.Struct({
 });
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
+});
+const ActivityLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  activityId: EventId,
 });
 // Windowed reads order turns by the stable keyset (anchor, turn key), where
 // anchor is requested_at and turn key is
@@ -315,6 +321,7 @@ function mapSessionRow(
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
+    ...(row.providerQuietSince !== null ? { providerQuietSince: row.providerQuietSince } : {}),
     updatedAt: row.updatedAt,
   };
 }
@@ -642,6 +649,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          provider_quiet_since AS "providerQuietSince",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         ORDER BY thread_id ASC
@@ -663,6 +671,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.provider_quiet_since AS "providerQuietSince",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -688,6 +697,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.provider_quiet_since AS "providerQuietSince",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -1111,6 +1121,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // `activity_id` is the table's primary key; `thread_id` is in the predicate so
+  // a client cannot read another thread's activity by guessing an id.
+  const getActivityRowById = SqlSchema.findOneOption({
+    Request: ActivityLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, activityId }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE activity_id = ${activityId}
+          AND thread_id = ${threadId}
+        LIMIT 1
+      `,
+  });
+
   const getThreadSessionRowByThread = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadSessionDbRowSchema,
@@ -1124,6 +1158,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          provider_quiet_since AS "providerQuietSince",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         WHERE thread_id = ${threadId}
@@ -1741,18 +1776,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
@@ -2392,6 +2416,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     };
   });
 
+  const getActivityOutput: ProjectionSnapshotQueryShape["getActivityOutput"] = Effect.fn(
+    "ProjectionSnapshotQuery.getActivityOutput",
+  )(function* (input) {
+    const row = yield* getActivityRowById(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getActivityOutput:query",
+          "ProjectionSnapshotQuery.getActivityOutput:decodeRow",
+        ),
+      ),
+    );
+    return Option.match(row, {
+      onNone: () => ({ text: null, truncated: false, diffs: [] }),
+      onSome: (activity) => extractActivityOutput(activity.payload),
+    });
+  });
+
   const getActiveProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getActiveProjectByWorkspaceRoot"] =
     (workspaceRoot) =>
       getActiveProjectRowByWorkspaceRoot({ workspaceRoot }).pipe(
@@ -2934,6 +2975,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getShellSnapshot,
     getArchivedShellSnapshot,
     searchThreads,
+    getActivityOutput,
     getSnapshotSequence,
     getCounts,
     getActiveProjectByWorkspaceRoot,

@@ -68,7 +68,7 @@ export type WorkLogToolLifecycleStatus =
   | "declined"
   | "stopped";
 
-/** Inline per-file diff preserved from ACP tool content on `tool.completed`. */
+/** One file's before/after from a tool's inline diff report. */
 export interface WorkLogDiff {
   path: string;
   oldText: string | null;
@@ -123,10 +123,6 @@ export interface WorkLogEntry {
   };
   /** Full thought text for `reasoning.completed` rows (markdown-ish). */
   reasoningText?: string;
-  /** Capped multi-line tool output from `data.rawOutput.fullText` (expanded body). */
-  fullOutputText?: string;
-  /** Inline diffs from `data.diffs` on completed file-change tools. */
-  diffs?: ReadonlyArray<WorkLogDiff>;
   /** Tool identity/args for per-tool row chrome and expanded rendering. */
   toolInfo?: WorkLogToolInfo;
 }
@@ -967,14 +963,6 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     }
   }
   const toolPayloadData = asRecord(payload?.data);
-  const fullOutputText = asTrimmedString(asRecord(toolPayloadData?.rawOutput)?.fullText);
-  if (fullOutputText) {
-    entry.fullOutputText = fullOutputText;
-  }
-  const diffs = extractWorkLogDiffs(toolPayloadData?.diffs);
-  if (diffs) {
-    entry.diffs = diffs;
-  }
   const toolInfo = extractWorkLogToolInfo(toolPayloadData?.toolInfo);
   if (toolInfo) {
     entry.toolInfo = toolInfo;
@@ -1421,26 +1409,6 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
   return asTrimmedString(data?.toolCallId);
-}
-
-function extractWorkLogDiffs(value: unknown): ReadonlyArray<WorkLogDiff> | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const diffs: WorkLogDiff[] = [];
-  for (const entryValue of value) {
-    const entry = asRecord(entryValue);
-    const path = asTrimmedString(entry?.path);
-    if (!entry || !path || typeof entry.newText !== "string") {
-      continue;
-    }
-    diffs.push({
-      path,
-      oldText: typeof entry.oldText === "string" ? entry.oldText : null,
-      newText: entry.newText,
-    });
-  }
-  return diffs.length > 0 ? diffs : undefined;
 }
 
 function extractWorkLogToolInfo(value: unknown): WorkLogToolInfo | undefined {

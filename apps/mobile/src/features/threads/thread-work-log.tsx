@@ -7,11 +7,7 @@ import { TouchableOpacity } from "react-native-gesture-handler";
 import { AppText as Text } from "../../components/AppText";
 import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
 import { cn } from "../../lib/cn";
-import {
-  inlineDiffSideLineCount,
-  type ThreadFeedActivity,
-  type ThreadFeedDiff,
-} from "../../lib/threadActivity";
+import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { basename } from "../files/filePath";
@@ -114,11 +110,6 @@ const WORK_LOG_BOTTOM_MARGIN = 4; // mb-1
 // keeps scrolling up past screenshots from jumping.
 const WORK_ROW_IMAGE_HEIGHT = 160;
 const WORK_ROW_IMAGE_MARGIN = 4; // mt-1
-// The auto-shown payload under a collapsed row. Its blocks are rendered with
-// an exact numberOfLines, so no line wraps and the height is the line count
-// times the scaled text-2xs line height — deterministic, like the image frame.
-const INLINE_BLOCK_VERTICAL_PADDING = 6; // pt-0.5 (2) + pb-1 (4)
-const INLINE_BLOCK_TOP_MARGIN = 4; // mt-1
 
 export const WORK_GROUP_TOGGLE_HEIGHT = 36; // min-h-8 (32) + mb-1 (4)
 
@@ -131,8 +122,8 @@ export function collapsedWorkLogHeight(
     return 0;
   }
   const onlyToolRows = rows.every((row) => row.toolLike);
-  const captionLineHeight = scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.caption, baseFontSize);
-  const headerHeight = captionLineHeight + WORK_LOG_HEADER_PADDING;
+  const headerHeight =
+    scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.caption, baseFontSize) + WORK_LOG_HEADER_PADDING;
   return (
     WORK_LOG_BOTTOM_MARGIN +
     (onlyToolRows ? 0 : headerHeight) +
@@ -140,26 +131,11 @@ export function collapsedWorkLogHeight(
       (total, row) =>
         total +
         WORK_ROW_HEIGHT +
-        (row.imagePath ? WORK_ROW_IMAGE_MARGIN + WORK_ROW_IMAGE_HEIGHT : 0) +
-        inlineWorkRowPayloadHeight(row, captionLineHeight),
+        (row.imagePath ? WORK_ROW_IMAGE_MARGIN + WORK_ROW_IMAGE_HEIGHT : 0),
       0,
     ) +
     (rows.length - 1) * WORK_ROW_GAP
   );
-}
-
-/** Lines the auto-shown diff block renders for one file: path, then each side. */
-function inlineDiffFileLineCount(diff: ThreadFeedDiff): number {
-  return 1 + inlineDiffSideLineCount(diff.oldText) + inlineDiffSideLineCount(diff.newText);
-}
-
-function inlineWorkRowPayloadHeight(row: ThreadFeedActivity, lineHeight: number): number {
-  const lines =
-    (row.inlineOutput === undefined ? 0 : row.inlineOutput.split("\n").length) +
-    (row.inlineDiffs?.reduce((total, diff) => total + inlineDiffFileLineCount(diff), 0) ?? 0);
-  return lines === 0
-    ? 0
-    : INLINE_BLOCK_TOP_MARGIN + INLINE_BLOCK_VERTICAL_PADDING + lines * lineHeight;
 }
 
 /**
@@ -200,79 +176,6 @@ function WorkRowInlineImage(props: {
         </TouchableOpacity>
       )}
     </View>
-  );
-}
-
-/**
- * The payload a row shows without being tapped: a short command output, a
- * small edit's diff. Lines never wrap — the block scrolls sideways the way the
- * repo's other code surfaces do — so the row's height is exactly its line
- * count and the feed can pre-measure it. Tapping the row still opens the
- * disclosure, which holds the untruncated text.
- */
-function WorkRowInlinePayload(props: {
-  readonly inlineOutput: string | undefined;
-  readonly inlineDiffs: ReadonlyArray<ThreadFeedDiff> | undefined;
-}) {
-  if (props.inlineOutput === undefined && props.inlineDiffs === undefined) {
-    return null;
-  }
-
-  return (
-    <View className="ml-7 mt-1 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
-      <ScrollView
-        horizontal
-        bounces={false}
-        directionalLockEnabled
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingRight: 8 }}
-      >
-        <View>
-          {props.inlineOutput === undefined ? null : (
-            <Text selectable className="font-mono text-2xs text-foreground-muted">
-              {props.inlineOutput}
-            </Text>
-          )}
-          {props.inlineDiffs?.map((diff) => (
-            <WorkRowInlineDiff key={diff.path} diff={diff} />
-          ))}
-        </View>
-      </ScrollView>
-    </View>
-  );
-}
-
-/**
- * One file's change as the CLI shows it: the file name, then the replaced
- * lines, then the new ones. No diff algorithm runs here — the adapter hands
- * over whole-side texts, and for edits this small the before/after pair reads
- * as the change.
- */
-function WorkRowInlineDiff(props: { readonly diff: ThreadFeedDiff }) {
-  const { oldText, newText } = props.diff;
-
-  return (
-    <>
-      <Text className="font-mono text-2xs text-foreground-muted opacity-60">
-        {basename(props.diff.path)}
-      </Text>
-      {oldText === null || oldText.length === 0 ? null : (
-        <Text selectable className="font-mono text-2xs text-rose-600 dark:text-rose-400">
-          {oldText
-            .split("\n")
-            .map((line) => `- ${line}`)
-            .join("\n")}
-        </Text>
-      )}
-      {newText.length === 0 ? null : (
-        <Text selectable className="font-mono text-2xs text-emerald-700 dark:text-emerald-400">
-          {newText
-            .split("\n")
-            .map((line) => `+ ${line}`)
-            .join("\n")}
-        </Text>
-      )}
-    </>
   );
 }
 
@@ -413,13 +316,6 @@ export function ThreadWorkLog(props: {
                   threadId={props.threadId}
                   imagePath={row.imagePath}
                   onPressImage={props.onPressImage}
-                />
-              ) : null}
-
-              {!expanded ? (
-                <WorkRowInlinePayload
-                  inlineOutput={row.inlineOutput}
-                  inlineDiffs={row.inlineDiffs}
                 />
               ) : null}
 

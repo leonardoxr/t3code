@@ -26,6 +26,7 @@ import {
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadStreamItem,
+  OrchestrationGetActivityOutputError,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadsError,
@@ -1167,6 +1168,20 @@ const makeWsRpcLayer = (
                 (cause) =>
                   new OrchestrationGetFullThreadDiffError({
                     message: "Failed to load full thread diff",
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getActivityOutput]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getActivityOutput,
+            projectionSnapshotQuery.getActivityOutput(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetActivityOutputError({
+                    message: "Failed to load activity output",
                     cause,
                   }),
               ),

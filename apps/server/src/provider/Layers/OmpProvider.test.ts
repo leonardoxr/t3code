@@ -38,6 +38,9 @@ describe("buildInitialOmpProviderSnapshot", () => {
       expect(snapshot.version).toBeNull();
       expect(snapshot.message).toContain("Checking Oh My Pi");
       expect(snapshot.requiresNewThreadForModelChange).toBe(false);
+      // omp over ACP cannot fold a prompt into a running turn; clients must
+      // queue mid-turn sends instead of pretending to steer.
+      expect(snapshot.midTurnSteering).toBe("queued");
     }),
   );
 });

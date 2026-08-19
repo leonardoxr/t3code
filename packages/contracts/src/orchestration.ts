@@ -28,6 +28,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
+  getActivityOutput: "orchestration.getActivityOutput",
   searchThreads: "orchestration.searchThreads",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
@@ -304,6 +305,13 @@ export const OrchestrationSession = Schema.Struct({
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * Set while a running turn's provider has produced no inbound frame for
+   * the silence threshold: the timestamp of the last observed activity.
+   * Absent when the provider is streaming normally. Optional so payloads
+   * from older servers still decode.
+   */
+  providerQuietSince: Schema.optional(IsoDateTime),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
@@ -1792,6 +1800,36 @@ export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThr
 export const OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 export type OrchestrationGetFullThreadDiffResult = typeof OrchestrationGetFullThreadDiffResult.Type;
 
+/**
+ * Expanded tool rows fetch their body instead of carrying it: a thread's wire
+ * payloads keep only the one-line summaries, so a resumed thread stays flat in
+ * the output its tools produced. Keyed by the activity id clients already hold.
+ */
+export const OrchestrationGetActivityOutputInput = Schema.Struct({
+  threadId: ThreadId,
+  activityId: EventId,
+});
+export type OrchestrationGetActivityOutputInput = typeof OrchestrationGetActivityOutputInput.Type;
+
+export const OrchestrationActivityOutputDiff = Schema.Struct({
+  path: Schema.String,
+  oldText: Schema.NullOr(Schema.String),
+  newText: Schema.String,
+});
+export type OrchestrationActivityOutputDiff = typeof OrchestrationActivityOutputDiff.Type;
+
+/**
+ * `text` is null when the activity produced nothing renderable, when the row
+ * predates the fetch, or when a revert pruned it — every case renders as the
+ * collapsed summary, so callers never need to tell them apart.
+ */
+export const OrchestrationGetActivityOutputResult = Schema.Struct({
+  text: Schema.NullOr(Schema.String),
+  truncated: Schema.Boolean,
+  diffs: Schema.Array(OrchestrationActivityOutputDiff),
+});
+export type OrchestrationGetActivityOutputResult = typeof OrchestrationGetActivityOutputResult.Type;
+
 export const OrchestrationThreadSearchSource = Schema.Literals(["user", "assistant"]);
 export type OrchestrationThreadSearchSource = typeof OrchestrationThreadSearchSource.Type;
 
@@ -1882,6 +1920,10 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationGetFullThreadDiffInput,
     output: OrchestrationGetFullThreadDiffResult,
   },
+  getActivityOutput: {
+    input: OrchestrationGetActivityOutputInput,
+    output: OrchestrationGetActivityOutputResult,
+  },
   searchThreads: {
     input: OrchestrationSearchThreadsInput,
     output: OrchestrationSearchThreadsResult,
@@ -1926,6 +1968,14 @@ export class OrchestrationGetTurnDiffError extends Schema.TaggedErrorClass<Orche
 
 export class OrchestrationGetFullThreadDiffError extends Schema.TaggedErrorClass<OrchestrationGetFullThreadDiffError>()(
   "OrchestrationGetFullThreadDiffError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationGetActivityOutputError extends Schema.TaggedErrorClass<OrchestrationGetActivityOutputError>()(
+  "OrchestrationGetActivityOutputError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
