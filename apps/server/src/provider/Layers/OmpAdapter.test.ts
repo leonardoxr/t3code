@@ -41,6 +41,7 @@ import {
   parseOmpTaskToolResults,
   resolveOmpQuietTransition,
   resolveOmpRequestedModeId,
+  resolveOmpSilenceGiveUp,
 } from "./OmpAdapter.ts";
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
 
@@ -363,6 +364,39 @@ it("resolveOmpQuietTransition flags sustained silence and nothing else", () => {
   assert.deepEqual(
     resolveOmpQuietTransition({ ...base, turnActive: false, quietAlreadyMarked: true }),
     { _tag: "none" },
+  );
+});
+
+it("resolveOmpSilenceGiveUp fires only once total silence crosses the give-up threshold", () => {
+  assert.isFalse(
+    resolveOmpSilenceGiveUp({
+      nowMillis: 100_000,
+      quietSinceMillis: undefined,
+      thresholdMillis: 600_000,
+    }),
+  );
+  // Marked quiet, but not for long enough yet.
+  assert.isFalse(
+    resolveOmpSilenceGiveUp({
+      nowMillis: 609_999,
+      quietSinceMillis: 10_000,
+      thresholdMillis: 600_000,
+    }),
+  );
+  // Exactly at the threshold → gives up.
+  assert.isTrue(
+    resolveOmpSilenceGiveUp({
+      nowMillis: 610_000,
+      quietSinceMillis: 10_000,
+      thresholdMillis: 600_000,
+    }),
+  );
+  assert.isTrue(
+    resolveOmpSilenceGiveUp({
+      nowMillis: 700_000,
+      quietSinceMillis: 10_000,
+      thresholdMillis: 600_000,
+    }),
   );
 });
 
@@ -1013,6 +1047,64 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
       yield* Fiber.interrupt(runtimeEventsFiber);
       yield* adapter.stopSession(threadId);
     }).pipe(TestClock.withLive),
+  );
+
+  it.effect(
+    "settles the turn as failed when the Oh My Pi process dies mid-prompt, instead of hanging",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("omp-process-dies-mid-prompt");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockOmpWrapper({
+            T3_ACP_EXIT_DURING_PROMPT: "1",
+          }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+
+        const runtimeEvents: ProviderRuntimeEvent[] = [];
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("omp"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+
+        yield* adapter
+          .sendTurn({
+            threadId,
+            input: "trigger a crash",
+            attachments: [],
+          })
+          .pipe(Effect.ignore);
+
+        const completedEvent = yield* Effect.gen(function* () {
+          while (true) {
+            const found = runtimeEvents.find(
+              (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+                event.type === "turn.completed" && String(event.threadId) === String(threadId),
+            );
+            if (found) {
+              return found;
+            }
+            yield* Effect.sleep("25 millis");
+          }
+        }).pipe(Effect.timeout("5 seconds"));
+
+        assert.equal(completedEvent.payload.state, "failed");
+
+        const sessionsAfter = yield* adapter.listSessions();
+        const sessionAfter = sessionsAfter.find((session) => session.threadId === threadId);
+        assert.notEqual(sessionAfter?.status, "running");
+
+        yield* Fiber.interrupt(runtimeEventsFiber);
+        yield* adapter.stopSession(threadId).pipe(Effect.ignore);
+      }).pipe(TestClock.withLive),
   );
 
   it.effect("does not let a cancelled prompt settlement consume the follow-up prompt slot", () =>
