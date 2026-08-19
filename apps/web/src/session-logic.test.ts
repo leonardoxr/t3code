@@ -15,6 +15,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  deriveRateLimitResetsAt,
   deriveWorkLogEntries,
   findLatestProposedPlan,
   hasActionableProposedPlan,
@@ -1982,5 +1983,52 @@ describe("rerun workflows", () => {
     const spawnRows = entries.filter((entry) => entry.agentSpawn !== undefined);
     expect(spawnRows.map((row) => row.agentSpawn!.workflowId)).toEqual(["wf-run1", "wf-run2"]);
     expect(spawnRows.map((row) => row.turnId)).toEqual(["turn-1", "turn-2"]);
+  });
+});
+
+describe("deriveRateLimitResetsAt", () => {
+  const rateLimited = (resetsAt: string, overrides?: { createdAt?: string; id?: string }) =>
+    makeActivity({
+      kind: "turn.rate-limited",
+      tone: "error",
+      summary: "Rate limited by the model provider",
+      payload: { resetsAt },
+      ...overrides,
+    });
+  const nowMs = Date.parse("2026-08-19T04:20:00.000Z");
+
+  it("labels a window that has not elapsed yet", () => {
+    expect(deriveRateLimitResetsAt([rateLimited("2026-08-19T05:22:00.000Z")], nowMs)).toBe(
+      "2026-08-19T05:22:00.000Z",
+    );
+  });
+
+  it("drops an elapsed window instead of showing a reset time in the past", () => {
+    expect(deriveRateLimitResetsAt([rateLimited("2026-08-19T04:19:59.000Z")], nowMs)).toBeNull();
+  });
+
+  it("takes the newest window when the thread was rate limited more than once", () => {
+    const activities = [
+      rateLimited("2026-08-19T04:40:00.000Z", {
+        id: "first",
+        createdAt: "2026-08-19T03:27:00.000Z",
+      }),
+      rateLimited("2026-08-19T05:22:00.000Z", {
+        id: "second",
+        createdAt: "2026-08-19T04:09:00.000Z",
+      }),
+    ];
+
+    expect(deriveRateLimitResetsAt(activities, nowMs)).toBe("2026-08-19T05:22:00.000Z");
+  });
+
+  it("ignores threads with no rate-limit history and malformed payloads", () => {
+    expect(deriveRateLimitResetsAt([makeActivity({ kind: "tool.started" })], nowMs)).toBeNull();
+    expect(
+      deriveRateLimitResetsAt(
+        [makeActivity({ kind: "turn.rate-limited", payload: { resetsAt: "not a date" } })],
+        nowMs,
+      ),
+    ).toBeNull();
   });
 });

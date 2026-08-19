@@ -85,6 +85,7 @@ import {
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
   deriveTurnPlans,
+  deriveRateLimitResetsAt,
   findLatestProposedPlan,
   deriveWorkLogEntries,
   hasActionableProposedPlan,
@@ -2306,12 +2307,38 @@ function ChatViewContent(props: ChatViewProps) {
     () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
     [activeLatestTurn?.turnId, threadActivities],
   );
+  // A provider waiting out a rate limit streams nothing, so the working row
+  // would spin with no explanation. One timeout at the reset instant retires
+  // the label — no repainting interval.
+  const [rateLimitNowMs, setRateLimitNowMs] = useState(() => Date.now());
+  const rateLimitResetsAt = useMemo(
+    () => deriveRateLimitResetsAt(threadActivities, rateLimitNowMs),
+    [rateLimitNowMs, threadActivities],
+  );
+  useEffect(() => {
+    if (!rateLimitResetsAt) {
+      return;
+    }
+    const timer = setTimeout(
+      () => setRateLimitNowMs(Date.now()),
+      Math.max(0, Date.parse(rateLimitResetsAt) - Date.now()) + 250,
+    );
+    return () => clearTimeout(timer);
+  }, [rateLimitResetsAt]);
   // Current step for the in-chat working row: only for the running turn's own
   // plan (deriveActivePlanState falls back to older turns' plans, which must
   // not label fresh work). Falls back to the first pending step so an
   // all-pending freshly written plan labels the row, matching the chip and
-  // the server's planProgress.
+  // the server's planProgress. An open rate-limit window outranks the step:
+  // nothing is progressing until it clears.
   const workingStepLabel = useMemo(() => {
+    if (rateLimitResetsAt) {
+      const until = new Date(rateLimitResetsAt).toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      return `rate limited until ${until}`;
+    }
     if (!activePlan || activePlan.turnId !== (activeLatestTurn?.turnId ?? null)) {
       return null;
     }
@@ -2320,7 +2347,7 @@ function ChatViewContent(props: ChatViewProps) {
       activePlan.steps.find((step) => step.status === "pending")?.step ??
       null
     );
-  }, [activeLatestTurn?.turnId, activePlan]);
+  }, [activeLatestTurn?.turnId, activePlan, rateLimitResetsAt]);
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
     interactionMode === "plan" &&

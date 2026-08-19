@@ -368,6 +368,13 @@ const TurnCompletedPayload = Schema.Struct({
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * When the turn failed because the upstream model provider rate-limited the
+   * account, the instant the window is expected to clear. Adapters set this
+   * only when the provider reports a retry-after; clients use it to label the
+   * wait instead of showing an unexplained spinner.
+   */
+  rateLimitResetsAt: Schema.optional(IsoDateTime),
 });
 export type TurnCompletedPayload = typeof TurnCompletedPayload.Type;
 

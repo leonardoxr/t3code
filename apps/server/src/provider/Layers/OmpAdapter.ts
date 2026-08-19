@@ -28,6 +28,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -135,6 +136,16 @@ interface OmpSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  /**
+   * Head of the assistant message being streamed, capped at
+   * OMP_RATE_LIMIT_SCAN_LIMIT, so a rate-limit report split across content
+   * deltas is still recognized. Reset per assistant item.
+   */
+  rateLimitScan: { turnId: TurnId; head: string } | undefined;
+  /** Rate-limit report seen in this turn; settles the turn as failed. */
+  rateLimitedTurn:
+    | { turnId: TurnId; errorMessage: string; resetsAt: string | undefined }
+    | undefined;
   stopped: boolean;
 }
 
@@ -366,6 +377,62 @@ export function ompPromptSettlementBelongsToContext(input: {
   );
 }
 
+/**
+ * Parsed shape of the upstream rate-limit error omp reports as assistant text,
+ * e.g. `429 {"type":"error","error":{"type":"rate_limit_error","message":"…"},
+ * "request_id":"req_…"} retry-after-ms=4300000`.
+ */
+export interface OmpRateLimitNotice {
+  /** Milliseconds the provider asked us to wait, when it reported one. */
+  readonly retryAfterMs: number | undefined;
+  readonly requestId: string | undefined;
+  readonly providerMessage: string | undefined;
+}
+
+/** Longest assistant-message head scanned for a rate-limit notice. */
+export const OMP_RATE_LIMIT_SCAN_LIMIT = 512;
+
+/**
+ * Recognizes omp's raw rate-limit report, which arrives as the whole assistant
+ * message: omp prints the upstream HTTP error verbatim and ends the turn with
+ * `end_turn`, so without this the turn is recorded as a success whose only
+ * content is a 429 blob.
+ *
+ * Deliberately strict — the notice must BE the message, not appear inside it.
+ * An agent quoting a 429 while discussing rate limits is prose, not a failure.
+ */
+export function parseOmpRateLimitNotice(text: string): OmpRateLimitNotice | undefined {
+  const trimmed = text.trim();
+  if (!/^429\b/.test(trimmed) || !trimmed.includes("rate_limit_error")) {
+    return undefined;
+  }
+  const retryAfter = /retry-after-ms=(\d{1,15})\b/.exec(trimmed);
+  const requestId = /"request_id"\s*:\s*"([^"]{1,128})"/.exec(trimmed);
+  const providerMessage = /"message"\s*:\s*"([^"]{1,400})"/.exec(trimmed);
+  return {
+    retryAfterMs: retryAfter ? Number(retryAfter[1]) : undefined,
+    requestId: requestId?.[1],
+    providerMessage: providerMessage?.[1],
+  };
+}
+
+/**
+ * Turn error text for a rate-limit notice. Carries the absolute instant (the
+ * client renders it in local time) plus the wait in minutes, so the banner
+ * answers "when can I retry" without the user decoding `retry-after-ms`.
+ */
+export function formatOmpRateLimitTurnError(
+  notice: OmpRateLimitNotice,
+  resetsAt: string | undefined,
+): string {
+  const detail = notice.providerMessage ?? "The model provider rate-limited this account.";
+  if (resetsAt === undefined || notice.retryAfterMs === undefined) {
+    return `Rate limited by the model provider. ${detail}`;
+  }
+  const minutes = Math.max(1, Math.round(notice.retryAfterMs / 60_000));
+  return `Rate limited by the model provider. ${detail} Retry after ${resetsAt} (about ${minutes} min).`;
+}
+
 export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiveOptions) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("omp");
@@ -436,6 +503,25 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
 
+    /**
+     * Terminal payload for a turn whose outcome was omp echoing an upstream
+     * rate-limit error: `end_turn` from omp would otherwise record a success
+     * whose only content is the 429 blob. Consumes the notice so a second
+     * settle for the same turn cannot re-report it.
+     */
+    const takeRateLimitFailurePayload = (ctx: OmpSessionContext, turnId: TurnId) => {
+      const rateLimited = ctx.rateLimitedTurn;
+      if (rateLimited === undefined || rateLimited.turnId !== turnId) {
+        return undefined;
+      }
+      ctx.rateLimitedTurn = undefined;
+      return {
+        state: "failed" as const,
+        errorMessage: rateLimited.errorMessage,
+        ...(rateLimited.resetsAt !== undefined ? { rateLimitResetsAt: rateLimited.resetsAt } : {}),
+      };
+    };
+
     const settlePromptInFlight = (
       threadId: ThreadId,
       turnId: TurnId,
@@ -484,13 +570,17 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 },
               });
             } else if (options?.completedStopReason !== undefined) {
+              const rateLimitFailure =
+                options.completedStopReason === "cancelled"
+                  ? undefined
+                  : takeRateLimitFailurePayload(liveCtx, turnId);
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
                 provider: PROVIDER,
                 threadId,
                 turnId,
-                payload: {
+                payload: rateLimitFailure ?? {
                   state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
                   stopReason: options.completedStopReason ?? null,
                 },
@@ -560,15 +650,19 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             },
           });
         } else if (shouldEmitCompletedTurn) {
+          const rateLimitFailure =
+            options?.completedStopReason === "cancelled"
+              ? undefined
+              : takeRateLimitFailurePayload(liveCtx, settleTurnId);
           yield* offerRuntimeEvent({
             type: "turn.completed",
             ...(yield* makeEventStamp()),
             provider: PROVIDER,
             threadId,
             turnId: settleTurnId,
-            payload: {
-              state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
-              stopReason: options.completedStopReason ?? null,
+            payload: rateLimitFailure ?? {
+              state: options?.completedStopReason === "cancelled" ? "cancelled" : "completed",
+              stopReason: options?.completedStopReason ?? null,
             },
           });
         }
@@ -926,6 +1020,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            rateLimitScan: undefined,
+            rateLimitedTurn: undefined,
             stopped: false,
           };
 
@@ -977,6 +1073,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
 
                 switch (event._tag) {
                   case "AssistantItemStarted":
+                    ctx.rateLimitScan = { turnId: notificationTurnId, head: "" };
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp,
@@ -1022,7 +1119,32 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       }),
                     );
                     return;
-                  case "ContentDelta":
+                  case "ContentDelta": {
+                    const scanned =
+                      ctx.rateLimitScan?.turnId === notificationTurnId
+                        ? ctx.rateLimitScan.head
+                        : "";
+                    if (scanned.length < OMP_RATE_LIMIT_SCAN_LIMIT) {
+                      const head = `${scanned}${event.text}`.slice(0, OMP_RATE_LIMIT_SCAN_LIMIT);
+                      ctx.rateLimitScan = { turnId: notificationTurnId, head };
+                      const notice = parseOmpRateLimitNotice(head);
+                      if (notice) {
+                        const resetsAt =
+                          notice.retryAfterMs === undefined
+                            ? undefined
+                            : DateTime.formatIso(
+                                DateTime.addDuration(
+                                  yield* DateTime.now,
+                                  Duration.millis(notice.retryAfterMs),
+                                ),
+                              );
+                        ctx.rateLimitedTurn = {
+                          turnId: notificationTurnId,
+                          errorMessage: formatOmpRateLimitTurnError(notice, resetsAt),
+                          resetsAt,
+                        };
+                      }
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp,
@@ -1035,6 +1157,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       }),
                     );
                     return;
+                  }
                   case "ThoughtDelta":
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
@@ -1364,13 +1487,17 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                   updatedAt: completedAt,
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
+                const rateLimitFailure =
+                  result.stopReason === "cancelled"
+                    ? undefined
+                    : takeRateLimitFailurePayload(ctx, prepared.turnId);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),
                   provider: PROVIDER,
                   threadId: input.threadId,
                   turnId: prepared.turnId,
-                  payload: {
+                  payload: rateLimitFailure ?? {
                     state: result.stopReason === "cancelled" ? "cancelled" : "completed",
                     stopReason: result.stopReason,
                   },

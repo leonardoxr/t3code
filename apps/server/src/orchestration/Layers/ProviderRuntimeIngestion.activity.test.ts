@@ -3,6 +3,7 @@ import {
   ProviderDriverKind,
   RuntimeTaskId,
   ThreadId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -140,6 +141,43 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(activities).toHaveLength(1);
     const payload = activities[0]?.payload as Record<string, unknown>;
     expect(payload.data).toEqual(streamingData);
+  });
+});
+
+describe("runtimeEventToActivities rate-limited turns", () => {
+  it("records the reset instant so the wait is legible after the fact", () => {
+    const event = {
+      ...base,
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-rate-limited"),
+      turnId: TurnId.make("turn-1"),
+      payload: {
+        state: "failed",
+        errorMessage: "Rate limited by the model provider. Retry after 2026-08-06T01:13:00.000Z.",
+        rateLimitResetsAt: "2026-08-06T01:13:00.000Z",
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const activities = runtimeEventToActivities(event);
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]?.kind).toBe("turn.rate-limited");
+    expect(activities[0]?.tone).toBe("error");
+    expect(activities[0]?.turnId).toBe("turn-1");
+    const payload = activities[0]?.payload as Record<string, unknown>;
+    expect(payload.resetsAt).toBe("2026-08-06T01:13:00.000Z");
+  });
+
+  it("stays silent for turns that were not rate limited", () => {
+    const event = {
+      ...base,
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed"),
+      turnId: TurnId.make("turn-2"),
+      payload: { state: "completed", stopReason: "end_turn" },
+    } satisfies ProviderRuntimeEvent;
+
+    expect(runtimeEventToActivities(event)).toEqual([]);
   });
 });
 
