@@ -1,16 +1,26 @@
 # Organizing threads
 
-Pin a thread from its context menu to keep it in the pinned section above your active work.
-Pinned threads are shown independently of their project, including when you connect to more than
-one environment.
+Pin a thread from its menu to keep it at the top of its project. On web and desktop a pinned thread
+carries a pin marker in the sidebar and leads the project it belongs to; on mobile pinned threads
+lead their group in the thread list.
 
-On web and desktop, drag a pinned thread to change its position. On mobile, open the thread's menu
-and choose **Move up** or **Move down**. The order is stored by the server and appears on your
-other connected devices.
+On mobile, open a pinned thread's menu and choose **Move up** or **Move down** to arrange them. The
+order is stored by the server and is used everywhere you connect, so an order arranged on your
+phone is the order web and desktop display.
 
 If reordering is unavailable for one environment, update the T3 Code server running in that
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
+
+## Unsent drafts
+
+A new thread you typed into but never sent stays in a **Drafts** section at the top of the sidebar,
+above your projects. Each row shows the project it targets and the first line of what you typed.
+Click it to pick the work back up with its model, mode, branch, and worktree selections intact, or
+hover the row and choose the **✕** to discard it.
+
+Starting another new thread never overwrites a draft you have invested in: it opens a fresh one and
+leaves yours in the list. A draft disappears from the list once you send it or discard it.
 
 ## Environment artwork
 

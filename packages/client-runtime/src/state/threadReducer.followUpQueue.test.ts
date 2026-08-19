@@ -59,8 +59,6 @@ function makeThread(queuedFollowUps?: ReadonlyArray<OrchestrationQueuedFollowUp>
     createdAt: NOW,
     updatedAt: NOW,
     archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
     deletedAt: null,
     messages: [],
     proposedPlans: [],

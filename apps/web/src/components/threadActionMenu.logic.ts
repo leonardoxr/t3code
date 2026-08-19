@@ -1,5 +1,5 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
-import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-snooze";
 
 /**
  * Ids for the per-thread action menu. Snooze presets are dispatched as
@@ -10,8 +10,6 @@ export type ThreadActionMenuId =
   | "new-thread-on-branch"
   | "pin"
   | "unpin"
-  | "settle"
-  | "unsettle"
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
@@ -27,14 +25,12 @@ export type ThreadActionMenuId =
 export interface ThreadActionMenuState {
   readonly branch: string | null;
   readonly isPinned: boolean;
-  readonly isSettled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
-    readonly settlement: boolean;
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
@@ -66,16 +62,8 @@ export function buildThreadActionMenuItems(
             : { id: "pin" as const, label: "Pin thread" },
         ]
       : []),
-    // Both lifecycle actions stay available on pinned threads: settling
-    // clears the pin ("done" beats "keep on top"), and snoozing hides the
-    // card until wake with the pin intact.
-    ...(state.supports.settlement
-      ? [
-          state.isSettled
-            ? { id: "unsettle" as const, label: "Un-settle thread" }
-            : { id: "settle" as const, label: "Settle thread" },
-        ]
-      : []),
+    // Snoozing stays available on pinned threads: the card hides until wake
+    // with the pin intact.
     ...(state.supports.snooze
       ? [
           state.isSnoozed
@@ -106,10 +94,9 @@ export function buildThreadActionMenuItems(
     ...(state.branch ? [{ id: "copy-branch" as const, label: "Copy branch", icon: "copy" }] : []),
     { id: "copy-thread-id", label: "Copy thread ID", icon: "copy" },
     // Archive removes the thread from the sidebar while keeping its
-    // conversation under Settings > Archived threads — distinct from Settle
-    // (stays visible in the Settled shelf) and Delete (clears history for
-    // good), so it sits beside Delete without borrowing its destructive
-    // styling.
+    // conversation under Settings > Archived threads — distinct from Delete
+    // (clears history for good), so it sits beside Delete without borrowing
+    // its destructive styling.
     { id: "archive", label: "Archive thread", disabled: state.isRunning },
     { id: "delete", label: "Delete", destructive: true, icon: "trash" },
   ];

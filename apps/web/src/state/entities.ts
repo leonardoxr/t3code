@@ -222,18 +222,9 @@ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | 
   return appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
 }
 
-/** Whether the environment's server understands thread.settle/unsettle.
-    False for pre-settlement servers (capability defaults false on decode),
-    so clients under version skew fall back instead of erroring. */
-export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadSettlement === true
-  );
-}
-
 /** Whether the environment's server understands thread.snooze/unsnooze.
-    Same version-skew contract as settlement. */
+    False for older servers (capability defaults false on decode), so clients
+    under version skew fall back instead of erroring. */
 export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
@@ -242,7 +233,7 @@ export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boo
 }
 
 /** Whether the environment's server understands thread.pin/unpin.
-    Same version-skew contract as settlement. */
+    Same version-skew contract as snooze. */
 export function readEnvironmentSupportsPinning(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
@@ -251,7 +242,7 @@ export function readEnvironmentSupportsPinning(environmentId: EnvironmentId): bo
 }
 
 /** Whether the environment's server understands thread title regeneration.
-    Same version-skew contract as settlement. */
+    Same version-skew contract as snooze. */
 export function readEnvironmentSupportsTitleRegeneration(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
@@ -260,7 +251,7 @@ export function readEnvironmentSupportsTitleRegeneration(environmentId: Environm
 }
 
 /** Whether the environment's server understands thread.pin.reorder (and
-    orderKey on thread.pin). Same version-skew contract as settlement. */
+    orderKey on thread.pin). Same version-skew contract as snooze. */
 export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities

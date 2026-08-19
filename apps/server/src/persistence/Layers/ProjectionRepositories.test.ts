@@ -92,8 +92,6 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
         archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
         snoozedUntil: null,
         snoozedAt: null,
         pinnedAt: null,
@@ -135,14 +133,14 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
     }),
   );
 
-  it.effect("round-trips non-null settlement values through the thread row", () =>
+  it.effect("round-trips non-null snooze and pin values through the thread row", () =>
     Effect.gen(function* () {
       const threads = yield* ProjectionThreadRepository;
 
       yield* threads.upsert({
-        threadId: ThreadId.make("thread-settled"),
+        threadId: ThreadId.make("thread-snoozed"),
         projectId: ProjectId.make("project-1"),
-        title: "Settled thread",
+        title: "Snoozed thread",
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5.4",
@@ -155,8 +153,6 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-25T00:00:00.000Z",
         archivedAt: null,
-        settledOverride: "settled",
-        settledAt: "2026-03-25T00:00:00.000Z",
         snoozedUntil: "2026-03-26T09:00:00.000Z",
         snoozedAt: "2026-03-25T00:00:00.000Z",
         pinnedAt: "2026-03-25T00:00:00.000Z",
@@ -168,34 +164,27 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       });
 
       const persisted = yield* threads.getById({
-        threadId: ThreadId.make("thread-settled"),
+        threadId: ThreadId.make("thread-snoozed"),
       });
       const row = Option.getOrNull(persisted);
       if (!row) {
-        return yield* Effect.die("Expected settled projection_threads row to exist.");
+        return yield* Effect.die("Expected snoozed projection_threads row to exist.");
       }
-      assert.strictEqual(row.settledOverride, "settled");
-      assert.strictEqual(row.settledAt, "2026-03-25T00:00:00.000Z");
       assert.strictEqual(row.snoozedUntil, "2026-03-26T09:00:00.000Z");
       assert.strictEqual(row.snoozedAt, "2026-03-25T00:00:00.000Z");
       assert.strictEqual(row.pinnedAt, "2026-03-25T00:00:00.000Z");
 
-      // Un-settle to the keep-active pin and wake the snooze; confirm the
-      // flips persist.
+      // Wake the snooze and unpin; confirm the flips persist.
       yield* threads.upsert({
         ...row,
-        settledOverride: "active",
-        settledAt: null,
         snoozedUntil: null,
         snoozedAt: null,
         pinnedAt: null,
       });
       const repersisted = yield* threads.getById({
-        threadId: ThreadId.make("thread-settled"),
+        threadId: ThreadId.make("thread-snoozed"),
       });
       const updated = Option.getOrNull(repersisted);
-      assert.strictEqual(updated?.settledOverride, "active");
-      assert.strictEqual(updated?.settledAt, null);
       assert.strictEqual(updated?.snoozedUntil, null);
       assert.strictEqual(updated?.snoozedAt, null);
       assert.strictEqual(updated?.pinnedAt, null);

@@ -46,8 +46,6 @@ function makeThread(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     ...input,
-    settledOverride: input.settledOverride ?? null,
-    settledAt: input.settledAt ?? null,
   };
 }
 
@@ -72,7 +70,7 @@ function buildGroups(
 }
 
 describe("buildHomeThreadGroups", () => {
-  it("builds one v2 scope for the same repository across environments", () => {
+  it("builds one project scope for the same repository across environments", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
     const repositoryIdentity = {
@@ -228,7 +226,7 @@ describe("buildHomeThreadGroups", () => {
     expect(scopes[0]?.projectRefs).toHaveLength(3);
   });
 
-  it("sorts v2 project scopes by their grouped thread activity", () => {
+  it("sorts project scopes by their grouped thread activity", () => {
     const environmentId = EnvironmentId.make("environment-1");
     const olderProject = makeProject({
       environmentId,
@@ -640,6 +638,85 @@ describe("buildHomeThreadGroups", () => {
       "thread-2",
     ]);
     expect(group?.threads).toHaveLength(5);
+  });
+
+  it("leads each group with its pinned threads in pinOrderKey order", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "T3 Code",
+    });
+    const threads = [
+      makeThread({
+        environmentId,
+        id: ThreadId.make("newest"),
+        projectId: project.id,
+        title: "Newest",
+        updatedAt: "2026-06-28T00:00:00.000Z",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("pinned-second"),
+        projectId: project.id,
+        title: "Pinned second",
+        updatedAt: "2026-06-26T00:00:00.000Z",
+        pinnedAt: "2026-06-26T00:00:00.000Z",
+        pinOrderKey: "b",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("pinned-first"),
+        projectId: project.id,
+        title: "Pinned first",
+        updatedAt: "2026-06-27T00:00:00.000Z",
+        pinnedAt: "2026-06-27T00:00:00.000Z",
+        pinOrderKey: "a",
+      }),
+    ];
+
+    const group = buildGroups([project], threads)[0];
+    expect(group?.threads.map((thread) => thread.id)).toEqual([
+      "pinned-first",
+      "pinned-second",
+      "newest",
+    ]);
+  });
+
+  it("keeps a pinned thread visible however long it has been quiet", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "T3 Code",
+    });
+    const threads = [
+      makeThread({
+        environmentId,
+        id: ThreadId.make("recent"),
+        projectId: project.id,
+        title: "Today",
+        updatedAt: "2026-06-28T00:00:00.000Z",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("pinned-stale"),
+        projectId: project.id,
+        title: "Pinned but quiet",
+        updatedAt: "2026-05-01T00:00:00.000Z",
+        pinnedAt: "2026-05-01T00:00:00.000Z",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("unpinned-stale"),
+        projectId: project.id,
+        title: "Quiet",
+        updatedAt: "2026-05-02T00:00:00.000Z",
+      }),
+    ];
+
+    const group = buildGroups([project], threads)[0];
+    expect(group?.recentThreads.map((thread) => thread.id)).toEqual(["pinned-stale", "recent"]);
   });
 
   it("does not apply the recency window while searching", () => {

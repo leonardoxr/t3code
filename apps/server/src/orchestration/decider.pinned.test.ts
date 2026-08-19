@@ -18,8 +18,6 @@ function makeReadModel(input: {
   readonly pinnedAt?: string | null;
   readonly pinOrderKey?: string | null;
   readonly archivedAt?: string | null;
-  readonly settledOverride?: "settled" | "active" | null;
-  readonly settledAt?: string | null;
   readonly snoozedUntil?: string | null;
   readonly snoozedAt?: string | null;
 }): OrchestrationReadModel {
@@ -40,8 +38,6 @@ function makeReadModel(input: {
         createdAt: NOW,
         updatedAt: NOW,
         archivedAt: input.archivedAt ?? null,
-        settledOverride: input.settledOverride ?? null,
-        settledAt: input.settledAt ?? (input.settledOverride === "settled" ? NOW : null),
         snoozedUntil: input.snoozedUntil ?? null,
         snoozedAt: input.snoozedAt ?? (input.snoozedUntil != null ? PINNED_AT : null),
         pinnedAt: input.pinnedAt ?? null,
@@ -133,25 +129,6 @@ it.layer(NodeServices.layer)("pinned thread decider", (it) => {
     }),
   );
 
-  it.effect("pinning a settled thread also un-settles it", () =>
-    Effect.gen(function* () {
-      const event = yield* decideOrchestrationCommand({
-        command: {
-          type: "thread.pin",
-          commandId: CommandId.make("cmd-pin-settled"),
-          threadId: ThreadId.make("thread-1"),
-        },
-        readModel: makeReadModel({ settledOverride: "settled" }),
-      });
-      const events = Array.isArray(event) ? event : [event];
-      expect(events.map((entry) => entry.type)).toEqual(["thread.pinned", "thread.unsettled"]);
-      const unsettled = events.find((entry) => entry.type === "thread.unsettled");
-      if (unsettled?.type === "thread.unsettled") {
-        expect(unsettled.payload.reason).toBe("user");
-      }
-    }),
-  );
-
   it.effect("pinning a snoozed thread also wakes it", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({
@@ -179,36 +156,6 @@ it.layer(NodeServices.layer)("pinned thread decider", (it) => {
       });
       const events = Array.isArray(event) ? event : [event];
       expect(events.map((entry) => entry.type)).toEqual(["thread.pinned"]);
-    }),
-  );
-
-  it.effect("settling a pinned thread also unpins it", () =>
-    Effect.gen(function* () {
-      const event = yield* decideOrchestrationCommand({
-        command: {
-          type: "thread.settle",
-          commandId: CommandId.make("cmd-settle-pinned"),
-          threadId: ThreadId.make("thread-1"),
-        },
-        readModel: makeReadModel({ pinnedAt: PINNED_AT }),
-      });
-      const events = Array.isArray(event) ? event : [event];
-      expect(events.map((entry) => entry.type)).toEqual(["thread.settled", "thread.unpinned"]);
-    }),
-  );
-
-  it.effect("settling an unpinned thread emits no unpin event", () =>
-    Effect.gen(function* () {
-      const event = yield* decideOrchestrationCommand({
-        command: {
-          type: "thread.settle",
-          commandId: CommandId.make("cmd-settle-unpinned"),
-          threadId: ThreadId.make("thread-1"),
-        },
-        readModel: makeReadModel({}),
-      });
-      const events = Array.isArray(event) ? event : [event];
-      expect(events.map((entry) => entry.type)).toEqual(["thread.settled"]);
     }),
   );
 

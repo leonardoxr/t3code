@@ -15,8 +15,6 @@ import {
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
   OrchestrationSession,
-  OrchestrationThread,
-  OrchestrationThreadShell,
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
@@ -40,8 +38,6 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
-const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
-const decodeOrchestrationThreadShell = Schema.decodeUnknownEffect(OrchestrationThreadShell);
 const encodeThreadCreatedPayload = Schema.encodeEffect(ThreadCreatedPayload);
 
 function getOptionValue(
@@ -357,72 +353,24 @@ it.effect("decodes thread archive and unarchive commands", () =>
   }),
 );
 
-it.effect("decodes thread settle and unsettle commands", () =>
+it.effect("rejects the retired thread settle and unsettle commands", () =>
   Effect.gen(function* () {
+    // A stale client may still send these; they must fail to decode rather
+    // than reach the decider.
     const settle = yield* decodeOrchestrationCommand({
       type: "thread.settle",
       commandId: "cmd-settle-1",
       threadId: "thread-1",
-    });
+    }).pipe(Effect.flip);
     const unsettle = yield* decodeOrchestrationCommand({
       type: "thread.unsettle",
       commandId: "cmd-unsettle-1",
       threadId: "thread-1",
       reason: "user",
-    });
-
-    assert.strictEqual(settle.type, "thread.settle");
-    assert.strictEqual(unsettle.type, "thread.unsettle");
-
-    // "activity" is server-owned: it exists on the event, never on the
-    // command, so a client cannot forge the neutral reset.
-    const forged = yield* decodeOrchestrationCommand({
-      type: "thread.unsettle",
-      commandId: "cmd-unsettle-2",
-      threadId: "thread-1",
-      reason: "activity",
     }).pipe(Effect.flip);
-    assert.ok(forged);
-  }),
-);
 
-it.effect("defaults settled fields when decoding historical thread data", () =>
-  Effect.gen(function* () {
-    const common = {
-      id: "thread-1",
-      projectId: "project-1",
-      title: "Historical thread",
-      modelSelection: { provider: "codex", model: "gpt-5.4" },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      latestTurn: null,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      archivedAt: null,
-      session: null,
-    };
-    const thread = yield* decodeOrchestrationThread({
-      ...common,
-      deletedAt: null,
-      messages: [],
-      proposedPlans: [],
-      activities: [],
-      checkpoints: [],
-    });
-    const shell = yield* decodeOrchestrationThreadShell({
-      ...common,
-      latestUserMessageAt: null,
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
-      hasActionableProposedPlan: false,
-    });
-
-    assert.strictEqual(thread.settledOverride, null);
-    assert.strictEqual(thread.settledAt, null);
-    assert.strictEqual(shell.settledOverride, null);
-    assert.strictEqual(shell.settledAt, null);
+    assert.ok(settle);
+    assert.ok(unsettle);
   }),
 );
 
@@ -470,7 +418,11 @@ it.effect("decodes thread archived and unarchived events", () =>
   }),
 );
 
-it.effect("decodes thread settled and unsettled events", () =>
+// Retired lifecycle, load-bearing test: every persisted row is decoded through
+// the closed OrchestrationEvent union on replay, so these two event types must
+// stay decodable forever or any database that ever settled a thread fails to
+// boot.
+it.effect("still decodes retired thread settled and unsettled history events", () =>
   Effect.gen(function* () {
     const settled = yield* decodeOrchestrationEvent({
       sequence: 1,
