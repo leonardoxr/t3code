@@ -1292,6 +1292,55 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
     }),
   );
 
+  it.effect("reports what the agent hid behind a generic internal error", () =>
+    Effect.gen(function* () {
+      // omp answers an unclassified handler throw with `-32603 "Internal
+      // error"` and the real sentence in `data.details`. Surfacing only the
+      // message left a failed turn saying nothing an operator could act on.
+      const threadId = ThreadId.make("omp-prompt-internal-error-details");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockOmpWrapper({
+          T3_ACP_PROMPT_ERROR_DETAILS: "ACP session closed before queued prompt could run",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({ threadId, input: "fail prompt", attachments: [] }),
+      );
+      const failedTurnCompleted = runtimeEvents.find(
+        (event) => event.type === "turn.completed" && event.threadId === threadId,
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.include(error.message, "ACP session closed before queued prompt could run");
+      assert.equal(failedTurnCompleted?.type, "turn.completed");
+      if (failedTurnCompleted?.type === "turn.completed") {
+        assert.equal(failedTurnCompleted.payload.state, "failed");
+        assert.include(
+          String(failedTurnCompleted.payload.errorMessage),
+          "ACP session closed before queued prompt could run",
+        );
+      }
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("ignores replayed session/load updates when resuming an Oh My Pi session", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("omp-load-replay-filter");
