@@ -3,6 +3,7 @@ import {
   type MessageId,
   type ScopedThreadRef,
   type ServerProviderSkill,
+  type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -71,6 +72,8 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { useAssetUrlState } from "~/assets/assetUrls";
+import { basenameOfPath } from "../../pierre-icons";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
@@ -2214,6 +2217,46 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   );
 });
 
+/**
+ * Renders the image an agent looked at, inline under its tool row. The bytes
+ * come from a signed workspace-file asset URL rather than the socket, so the
+ * path must resolve inside the thread's workspace — anything else (an image
+ * outside the root, a deleted file) fails the request and the row stays
+ * text-only. The frame is a fixed height so resolving the URL never reflows
+ * the virtualized list.
+ */
+const WorkEntryInlineImage = memo(function WorkEntryInlineImage(props: {
+  imagePath: string;
+  threadId: ThreadId;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const asset = useAssetUrlState(ctx.activeThreadEnvironmentId, {
+    _tag: "workspace-file",
+    threadId: props.threadId,
+    path: props.imagePath,
+  });
+  if (asset._tag === "Failure") {
+    return null;
+  }
+  const name = basenameOfPath(props.imagePath);
+  return (
+    <div className="mt-1 ms-7 cursor-default" onClick={stopRowToggle} onPointerDown={stopRowToggle}>
+      <div className="h-40 w-fit max-w-full overflow-hidden rounded-lg border border-border/70 bg-muted/30">
+        {asset._tag === "Success" ? (
+          <button
+            type="button"
+            className="block h-full cursor-zoom-in"
+            aria-label={`Preview ${name}`}
+            onClick={() => ctx.onImageExpand({ images: [{ src: asset.url, name }], index: 0 })}
+          >
+            <img src={asset.url} alt={name} className="block h-full w-auto object-contain" />
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
@@ -2232,6 +2275,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
 }) {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
+  const rowThreadId = use(TimelineRowCtx).threadRef?.threadId ?? null;
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
@@ -2370,6 +2414,9 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           </div>
         </div>
       </div>
+      {workEntry.imagePath && rowThreadId ? (
+        <WorkEntryInlineImage imagePath={workEntry.imagePath} threadId={rowThreadId} />
+      ) : null}
       {expanded && canExpand && expandedBody ? (
         <div
           className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"

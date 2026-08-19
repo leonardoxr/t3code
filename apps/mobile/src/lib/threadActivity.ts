@@ -8,6 +8,7 @@ import type {
   UserInputQuestion,
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
@@ -54,6 +55,11 @@ export interface ThreadFeedActivity {
     | "zap";
   readonly toolLike: boolean;
   readonly status: "success" | "failure" | "neutral" | null;
+  /**
+   * Absolute or workspace-relative path of an image the agent viewed on this
+   * tool call. The row renders it inline from a signed workspace-file asset URL.
+   */
+  readonly imagePath?: string;
 }
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
@@ -75,6 +81,11 @@ interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   toolData?: unknown;
+  /**
+   * Path of an image the agent viewed on this tool call, kept only when the
+   * extension is one the asset endpoint will sign.
+   */
+  imagePath?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -344,6 +355,20 @@ function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): bool
   return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
 }
 
+/**
+ * Adapters set `imagePath` when a tool call looked at an image. The extension
+ * check mirrors the asset endpoint, which only signs previewable images — a
+ * path it would reject must not turn into a broken inline image frame.
+ */
+function extractWorkLogImagePath(payload: Record<string, unknown> | null): string | undefined {
+  const imagePath = payload?.imagePath;
+  if (typeof imagePath !== "string") {
+    return undefined;
+  }
+  const trimmed = imagePath.trim();
+  return trimmed.length > 0 && isWorkspaceImagePreviewPath(trimmed) ? trimmed : undefined;
+}
+
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
@@ -413,6 +438,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (title) {
     entry.toolTitle = title;
+  }
+  const imagePath = extractWorkLogImagePath(payload);
+  if (imagePath) {
+    entry.imagePath = imagePath;
   }
   if (itemType === "mcp_tool_call") {
     const data = asRecord(payload?.data);
@@ -500,6 +529,7 @@ function mergeDerivedWorkLogEntries(
   const toolTitle = next.toolTitle ?? previous.toolTitle;
   const itemType = next.itemType ?? previous.itemType;
   const requestKind = next.requestKind ?? previous.requestKind;
+  const imagePath = next.imagePath ?? previous.imagePath;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
@@ -513,6 +543,7 @@ function mergeDerivedWorkLogEntries(
     ...(toolTitle ? { toolTitle } : {}),
     ...(itemType ? { itemType } : {}),
     ...(requestKind ? { requestKind } : {}),
+    ...(imagePath ? { imagePath } : {}),
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolLifecycleStatus ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
@@ -1566,6 +1597,7 @@ export function buildThreadFeed(
               icon: workEntryIcon(entry),
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
+              ...(entry.imagePath ? { imagePath: entry.imagePath } : {}),
             },
           };
         }),

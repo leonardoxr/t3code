@@ -39,6 +39,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -483,6 +484,13 @@ function mapItemLifecycle(
         ? "completed"
         : undefined;
 
+  /**
+   * Codex's `view_image` item carries the path it looked at. Passed through
+   * verbatim so the client can render it inline from a signed asset URL.
+   */
+  const imagePath =
+    item.type === "imageView" && isWorkspaceImagePreviewPath(item.path) ? item.path : undefined;
+
   return {
     ...runtimeEventBase(event, canonicalThreadId),
     type: lifecycle,
@@ -491,6 +499,7 @@ function mapItemLifecycle(
       ...(status ? { status } : {}),
       ...(itemTitle(itemType, item) ? { title: itemTitle(itemType, item) } : {}),
       ...(detail ? { detail } : {}),
+      ...(imagePath ? { imagePath } : {}),
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },
   };

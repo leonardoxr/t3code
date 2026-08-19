@@ -371,6 +371,120 @@ describe("buildThreadFeed", () => {
     expect(serializedToolOutputs).toBe(1);
   });
 
+  it("surfaces the viewed image path on mobile work rows", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-image"),
+      projectId: ProjectId.make("project-1"),
+      title: "Viewed a screenshot",
+      activities: [
+        makeActivity({
+          id: EventId.make("image-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "View image",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            title: "View image",
+            itemType: "image_view",
+            imagePath: "/ws/shot.png",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]).toMatchObject({
+      id: "image-completed",
+      icon: "eye",
+      imagePath: "/ws/shot.png",
+    });
+  });
+
+  it("ignores a viewed path the asset endpoint would not preview as an image", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-non-image"),
+      projectId: ProjectId.make("project-1"),
+      title: "Read a note",
+      activities: [
+        makeActivity({
+          id: EventId.make("note-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read notes",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            title: "Read notes",
+            itemType: "dynamic_tool_call",
+            imagePath: "/ws/notes.md",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]?.imagePath).toBeUndefined();
+  });
+
+  it("keeps the viewed image path when a tool lifecycle pair collapses", () => {
+    const turnId = TurnId.make("turn-image");
+    const thread = makeThread({
+      id: ThreadId.make("thread-image-collapse"),
+      projectId: ProjectId.make("project-1"),
+      title: "Collapsed image view",
+      activities: [
+        makeActivity({
+          id: EventId.make("image-updated"),
+          kind: "tool.updated",
+          tone: "tool",
+          summary: "View image",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId,
+          payload: {
+            title: "View image",
+            itemType: "image_view",
+            detail: "shot.png",
+            imagePath: "/ws/shot.png",
+          },
+        }),
+        makeActivity({
+          id: EventId.make("image-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "View image completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "View image",
+            itemType: "image_view",
+            detail: "shot.png",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities).toHaveLength(1);
+    expect(group.activities[0]).toMatchObject({
+      id: "image-completed",
+      imagePath: "/ws/shot.png",
+    });
+  });
+
   it("folds settled turn work while leaving the terminal answer visible", () => {
     const turnId = TurnId.make("turn-1");
     const thread = makeThread({

@@ -1294,6 +1294,61 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("carries an image tool call's path so the row can render it inline", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "image-update",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "Image view",
+        payload: {
+          itemType: "image_view",
+          title: "Image view",
+          imagePath: "/ws/shots/login.png",
+          data: { toolCallId: "tool-image-1" },
+        },
+      }),
+      makeActivity({
+        id: "image-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Image view",
+        payload: {
+          itemType: "image_view",
+          title: "Image view",
+          data: { toolCallId: "tool-image-1" },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "image-complete",
+      itemType: "image_view",
+      imagePath: "/ws/shots/login.png",
+    });
+  });
+
+  it("ignores a tool call path the asset endpoint would refuse to serve as an image", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "read-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Read File",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Read File",
+          imagePath: "/ws/notes.md",
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.imagePath).toBeUndefined();
+  });
+
   it("does not use command stdout as the detail when Cursor omits the command input", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

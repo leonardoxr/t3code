@@ -51,6 +51,7 @@ import {
   toOpenCodeQuestionAnswers,
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
+import { imagePathFromToolInput } from "../toolImagePath.ts";
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
@@ -919,6 +920,14 @@ export function makeOpenCodeAdapter(
             const title =
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
+            // Every ToolState variant carries the tool's arguments under
+            // `input`, so the target path is readable without narrowing. Only
+            // reads count: a write or edit of an SVG carries the same path,
+            // and rewriting a directory of icons must not splash them across
+            // the timeline.
+            const imagePath = part.tool.toLowerCase().includes("read")
+              ? imagePathFromToolInput(part.state.input)
+              : undefined;
             const payload = {
               itemType,
               ...(part.state.status === "error"
@@ -932,6 +941,7 @@ export function makeOpenCodeAdapter(
                 tool: part.tool,
                 state: part.state,
               },
+              ...(imagePath ? { imagePath } : {}),
             };
             const runtimeEvent: ProviderRuntimeEvent = {
               ...(yield* buildEventBase({

@@ -1150,6 +1150,115 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("reports the image path an OpenCode read tool looked at", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-tool-image");
+      // Shape of a completed `tool` part as the OpenCode SDK streams it: the
+      // tool's arguments live under `state.input`, and `read` names its target
+      // `filePath`.
+      const basePart = {
+        sessionID: "http://127.0.0.1:9999/session",
+        messageID: "msg-tool-image",
+        type: "tool",
+        tool: "read",
+        state: {
+          status: "completed",
+          output: "read 1 file",
+          title: "Read",
+          metadata: {},
+          time: { start: 1, end: 2 },
+        },
+      };
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: {
+              id: "msg-tool-image",
+              role: "assistant",
+            },
+          },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            part: {
+              ...basePart,
+              id: "part-tool-image",
+              callID: "call-tool-image",
+              state: { ...basePart.state, input: { filePath: "/ws/shot.png" } },
+            },
+            time: 1,
+          },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            part: {
+              ...basePart,
+              id: "part-tool-text",
+              callID: "call-tool-text",
+              state: { ...basePart.state, input: { filePath: "/ws/index.ts" } },
+            },
+            time: 2,
+          },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            part: {
+              ...basePart,
+              id: "part-tool-write",
+              callID: "call-tool-write",
+              tool: "write",
+              state: { ...basePart.state, input: { filePath: "/ws/icons/logo.svg" } },
+            },
+            time: 3,
+          },
+        },
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        // `startSession` emits session.started/thread.started first; only the
+        // tool items matter here.
+        Stream.filter((event) => event.threadId === threadId && event.type === "item.completed"),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.equal(events.length, 3);
+      const [imageItem, textItem, writeItem] = events;
+      if (
+        imageItem?.type !== "item.completed" ||
+        textItem?.type !== "item.completed" ||
+        writeItem?.type !== "item.completed"
+      ) {
+        throw new Error("expected three completed tool items");
+      }
+      NodeAssert.equal(imageItem.itemId, "call-tool-image");
+      // The read stays a dynamic tool call; only the image path is new.
+      NodeAssert.equal(imageItem.payload.itemType, "dynamic_tool_call");
+      NodeAssert.equal(imageItem.payload.imagePath, "/ws/shot.png");
+      NodeAssert.equal(textItem.itemId, "call-tool-text");
+      NodeAssert.equal("imagePath" in textItem.payload, false);
+      // A write of an image carries the same path but is not a viewing.
+      NodeAssert.equal(writeItem.itemId, "call-tool-write");
+      NodeAssert.equal("imagePath" in writeItem.payload, false);
+    }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
