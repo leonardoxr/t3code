@@ -483,7 +483,7 @@ describe("buildThreadFeed", () => {
     });
   });
 
-  it("folds settled turn work while leaving the terminal answer visible", () => {
+  it("keeps the latest settled turn open and folds it only when toggled", () => {
     const turnId = TurnId.make("turn-1");
     const thread = makeThread({
       id: ThreadId.make("thread-3"),
@@ -535,21 +535,95 @@ describe("buildThreadFeed", () => {
     });
 
     const feed = buildThreadFeed(thread);
-    const collapsed = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set());
-    expect(collapsed.map((entry) => entry.id)).toEqual(["turn-fold:turn-1", "assistant-final"]);
-    expect(collapsed[0]).toMatchObject({
-      type: "turn-fold",
-      label: "Worked for 17s",
-      expanded: false,
-    });
-
-    const expanded = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set([turnId]));
-    expect(expanded.map((entry) => entry.id)).toEqual([
+    // The turn the user just watched stays on screen; the fold row is still
+    // emitted because it carries the duration readout.
+    const presented = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set());
+    expect(presented.map((entry) => entry.id)).toEqual([
       "turn-fold:turn-1",
       "assistant-commentary",
       "tool-completed",
       "assistant-final",
     ]);
+    expect(presented[0]).toMatchObject({
+      type: "turn-fold",
+      label: "Worked for 17s",
+      expanded: true,
+    });
+
+    // The toggle set records a deviation from the default, so the same toggle
+    // that opens an old turn closes this one.
+    const collapsed = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set([turnId]));
+    expect(collapsed.map((entry) => entry.id)).toEqual(["turn-fold:turn-1", "assistant-final"]);
+    expect(collapsed[0]).toMatchObject({ type: "turn-fold", expanded: false });
+  });
+
+  it("folds the previous turn without a flash once the next message is sent", () => {
+    const turnId = TurnId.make("turn-1");
+    const latestTurn = {
+      turnId,
+      state: "completed" as const,
+      requestedAt: "2026-04-01T00:00:00.000Z",
+      startedAt: "2026-04-01T00:00:01.000Z",
+      completedAt: "2026-04-01T00:00:18.000Z",
+      assistantMessageId: MessageId.make("assistant-final"),
+    };
+    const thread = makeThread({
+      id: ThreadId.make("thread-post-send"),
+      projectId: ProjectId.make("project-1"),
+      title: "Post-send window",
+      latestTurn,
+      messages: [
+        {
+          id: MessageId.make("user-1"),
+          role: "user",
+          text: "Check the fold.",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:00.000Z",
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+        {
+          id: MessageId.make("assistant-final"),
+          role: "assistant",
+          text: "Done.",
+          turnId,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:17.000Z",
+          updatedAt: "2026-04-01T00:00:18.000Z",
+        },
+        // Sent moments ago: the server has not created its turn yet, so the
+        // turn above is history and must not pop open for that window.
+        {
+          id: MessageId.make("user-2"),
+          role: "user",
+          text: "Now the next thing.",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:20.000Z",
+          updatedAt: "2026-04-01T00:00:20.000Z",
+        },
+      ],
+      activities: [
+        makeActivity({
+          id: EventId.make("tool-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read files",
+          createdAt: "2026-04-01T00:00:05.000Z",
+          turnId,
+          payload: { title: "Read files", itemType: "file_read", status: "completed" },
+        }),
+      ],
+    });
+
+    const presented = deriveThreadFeedPresentation(buildThreadFeed(thread), latestTurn, new Set());
+    expect(presented.map((entry) => entry.id)).toEqual([
+      "user-1",
+      "turn-fold:turn-1",
+      "assistant-final",
+      "user-2",
+    ]);
+    expect(presented[1]).toMatchObject({ type: "turn-fold", expanded: false });
   });
 
   it("measures a steer-superseded turn from its user boundary through trailing work", () => {
@@ -737,6 +811,224 @@ describe("buildThreadFeed", () => {
       type: "work-toggle",
       expanded: true,
     });
+  });
+
+  it("lifts reasoning into its own prose row instead of a tool row", () => {
+    const turnId = TurnId.make("turn-thinking");
+    const thread = makeThread({
+      id: ThreadId.make("thread-thinking"),
+      projectId: ProjectId.make("project-1"),
+      title: "Thinking out loud",
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("tool-before"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read files",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId,
+          payload: { title: "Read files", itemType: "file_read", status: "completed" },
+        }),
+        makeActivity({
+          id: EventId.make("thought"),
+          kind: "reasoning.completed",
+          summary: "Weighing the fold",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: { text: "Weighing the fold\nagainst the toggle." },
+        }),
+        makeActivity({
+          id: EventId.make("tool-after"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Run command",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          turnId,
+          payload: { title: "Run command", itemType: "command_execution", status: "completed" },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    // Thinking breaks the tool group: prose reads in the flow, and the tools
+    // around it stay separate rows rather than absorbing it.
+    expect(feed.map((entry) => entry.type)).toEqual([
+      "activity-group",
+      "thinking",
+      "activity-group",
+    ]);
+    expect(feed[1]).toMatchObject({
+      type: "thinking",
+      id: "thought",
+      turnId,
+      text: "Weighing the fold\nagainst the toggle.",
+    });
+    expect(
+      feed.flatMap((entry) =>
+        entry.type === "activity-group" ? entry.activities.map((activity) => activity.id) : [],
+      ),
+    ).toEqual(["tool-before", "tool-after"]);
+  });
+
+  it("inlines a short tool output and a small diff, and leaves large ones behind the tap", () => {
+    const turnId = TurnId.make("turn-inline");
+    const thread = makeThread({
+      id: ThreadId.make("thread-inline"),
+      projectId: ProjectId.make("project-1"),
+      title: "Inline payloads",
+      activities: [
+        makeActivity({
+          id: EventId.make("short-output"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Run tests",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId,
+          payload: {
+            title: "Run tests",
+            itemType: "command_execution",
+            status: "completed",
+            data: { rawOutput: { fullText: "3 passed\n0 failed" } },
+          },
+        }),
+        makeActivity({
+          id: EventId.make("long-output"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Print log",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Print log",
+            itemType: "command_execution",
+            status: "completed",
+            data: {
+              rawOutput: { fullText: Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n") },
+            },
+          },
+        }),
+        makeActivity({
+          id: EventId.make("small-edit"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Edit file",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          turnId,
+          payload: {
+            title: "Edit file",
+            itemType: "file_change",
+            status: "completed",
+            data: {
+              diffs: [{ path: "/ws/a.ts", oldText: "const a = 1;", newText: "const a = 2;" }],
+            },
+          },
+        }),
+        makeActivity({
+          id: EventId.make("big-edit"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Rewrite file",
+          createdAt: "2026-04-01T00:00:04.000Z",
+          turnId,
+          payload: {
+            title: "Rewrite file",
+            itemType: "file_change",
+            status: "completed",
+            data: {
+              diffs: [
+                {
+                  path: "/ws/b.ts",
+                  oldText: null,
+                  newText: Array.from({ length: 81 }, (_, i) => `line ${i}`).join("\n"),
+                },
+              ],
+            },
+          },
+        }),
+      ],
+    });
+
+    const activitiesById = new Map(
+      buildThreadFeed(thread).flatMap((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.map((activity) => [activity.id, activity] as const)
+          : [],
+      ),
+    );
+
+    expect(activitiesById.get("short-output")?.inlineOutput).toBe("3 passed\n0 failed");
+    expect(activitiesById.get("long-output")?.inlineOutput).toBeUndefined();
+    // Everything stays reachable: the disclosure holds the full output.
+    expect(activitiesById.get("long-output")?.getFullDetail()).toContain("line 8");
+    expect(activitiesById.get("small-edit")?.inlineDiffs).toEqual([
+      { path: "/ws/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+    ]);
+    expect(activitiesById.get("big-edit")?.inlineDiffs).toBeUndefined();
+  });
+
+  it("shows every work row on the current turn and condenses older ones", () => {
+    const oldTurnId = TurnId.make("turn-old");
+    const currentTurnId = TurnId.make("turn-current");
+    const tool = (id: string, second: number, turnId: TurnId) =>
+      makeActivity({
+        id: EventId.make(id),
+        kind: "tool.completed",
+        tone: "tool",
+        summary: `Run ${id}`,
+        createdAt: new Date(Date.UTC(2026, 3, 1, 0, 0, second)).toISOString(),
+        turnId,
+        payload: { title: `Run ${id}`, itemType: "command_execution", status: "completed" },
+      });
+    const thread = makeThread({
+      id: ThreadId.make("thread-condense"),
+      projectId: ProjectId.make("project-1"),
+      title: "Condensation",
+      latestTurn: {
+        turnId: currentTurnId,
+        state: "running",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:04.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [
+        tool("old-1", 1, oldTurnId),
+        tool("old-2", 2, oldTurnId),
+        tool("old-3", 3, oldTurnId),
+        tool("current-1", 5, currentTurnId),
+        tool("current-2", 6, currentTurnId),
+        tool("current-3", 7, currentTurnId),
+      ],
+    });
+
+    // The old turn is opened so its condensation is observable; the current
+    // turn never condenses.
+    const presented = deriveThreadFeedPresentation(
+      buildThreadFeed(thread),
+      thread.latestTurn,
+      new Set([oldTurnId]),
+    );
+    expect(presented.map((entry) => entry.id)).toEqual([
+      "turn-fold:turn-old",
+      "old-3",
+      "work-toggle:old-1",
+      "current-1",
+    ]);
+    expect(presented[2]).toMatchObject({ type: "work-toggle", hiddenCount: 2, expanded: false });
+    expect(presented[3]).toMatchObject({
+      type: "activity-group",
+      turnId: currentTurnId,
+    });
+    const currentGroup = presented[3];
+    expect(currentGroup?.type === "activity-group" ? currentGroup.activities.length : 0).toBe(3);
   });
 });
 

@@ -956,6 +956,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "turn-plan" ? <TurnPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
+      {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
     </div>
   );
 });
@@ -1282,6 +1283,51 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+});
+
+/**
+ * Thinking rendered as prose in the flow, not as a tool row. Clamped so a long
+ * chain of thought does not push the answer off screen; the clamp is a static
+ * class swap on click, so there is no measurement pass and no repaint loop.
+ */
+const ThinkingTimelineRow = memo(function ThinkingTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "thinking" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [expanded, setExpanded] = useState(false);
+  const isLong = row.text.length > 320 || row.text.includes("\n");
+  return (
+    <div className="py-0.5 pl-1.5">
+      <div className="flex min-w-0 gap-2 border-border/40 border-s ps-3">
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              "text-[12px] text-secondary-label italic [&_*]:!text-secondary-label",
+              !expanded && "line-clamp-3",
+            )}
+          >
+            <ChatMarkdown
+              text={row.text}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+            />
+          </div>
+          {isLong ? (
+            <button
+              type="button"
+              className="mt-0.5 text-[11px] text-muted-foreground/60 hover:text-secondary-label"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "Show less" : "Show thinking"}
+            </button>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 });
@@ -2389,25 +2435,38 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       ? null
       : rawPreview;
   const displayText = preview ? `${heading} - ${preview}` : heading;
-  const reasoningText = workEntry.reasoningText;
   const toolCode = workEntry.toolInfo?.code;
   // LSP results are markdown (hover docs, fenced signatures); render them
   // through ChatMarkdown instead of the monospace <pre>.
   const renderResultAsMarkdown =
     workEntry.toolInfo?.name === "lsp" && workEntry.fullOutputText !== undefined;
-  const expandedBody = reasoningText
-    ? null
-    : buildToolCallExpandedBody(workEntry, workspaceRoot, {
-        omitFullOutput: renderResultAsMarkdown,
-      });
-  // Diffs render lazily: metadata is only computed once the row expands.
-  const hasDiffs = (workEntry.diffs?.length ?? 0) > 0;
+  const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot, {
+    omitFullOutput: renderResultAsMarkdown,
+  });
+  const diffs = workEntry.diffs ?? [];
+  const hasDiffs = diffs.length > 0;
+  // Small results show themselves. A handful of output lines or a one-file
+  // edit is the payload of the row, and hiding it behind a click is what made
+  // the timeline read as empty; anything bigger stays behind the disclosure so
+  // long threads keep their shape (and shiki stays lazy).
+  const inlineOutputText =
+    !renderResultAsMarkdown && workEntry.fullOutputText !== undefined
+      ? workEntry.fullOutputText
+      : undefined;
+  const autoShowOutput =
+    inlineOutputText !== undefined &&
+    inlineOutputText.length <= 600 &&
+    inlineOutputText.split("\n").length <= 8;
+  const autoShowDiffs =
+    hasDiffs &&
+    diffs.length <= 2 &&
+    diffs.reduce(
+      (lines, diff) =>
+        lines + diff.newText.split("\n").length + (diff.oldText?.split("\n").length ?? 0),
+      0,
+    ) <= 80;
   const canExpand =
-    expandedBody !== null ||
-    hasDiffs ||
-    toolCode !== undefined ||
-    renderResultAsMarkdown ||
-    (reasoningText !== undefined && reasoningText !== workEntry.label);
+    expandedBody !== null || hasDiffs || toolCode !== undefined || renderResultAsMarkdown;
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2426,9 +2485,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
     ? "font-medium text-warning"
     : showDestructiveRowStyle
       ? "font-medium text-destructive"
-      : reasoningText !== undefined
-        ? "font-normal italic text-secondary-label"
-        : "font-medium text-foreground";
+      : "font-medium text-foreground";
   const turnSettled = !activity.activeTurnInProgress;
   const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
   const showSuccessIndicator =
@@ -2536,52 +2593,60 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       {workEntry.imagePath && rowThreadId ? (
         <WorkEntryInlineImage imagePath={workEntry.imagePath} threadId={rowThreadId} />
       ) : null}
+      {/* Auto-shown payload: visible without a click when it is small enough
+          to belong in the flow. The disclosure below still holds everything. */}
+      {!expanded && (autoShowOutput || autoShowDiffs) ? (
+        <div
+          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+          onClick={stopRowToggle}
+          onPointerDown={stopRowToggle}
+        >
+          {autoShowOutput && inlineOutputText ? (
+            <pre className={toolCallExpandedBodyClassName}>{inlineOutputText}</pre>
+          ) : null}
+          {autoShowDiffs ? (
+            <WorkEntryDiffSection
+              diffs={diffs}
+              resolvedTheme={ctx.resolvedTheme}
+              workspaceRoot={workspaceRoot}
+            />
+          ) : null}
+        </div>
+      ) : null}
       {expanded && canExpand ? (
         <div
           className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
-          {reasoningText !== undefined ? (
+          {toolCode ? (
             <ChatMarkdown
-              text={reasoningText}
+              text={`\`\`\`\`${toolCode.language}\n${toolCode.text}\n\`\`\`\``}
               cwd={ctx.markdownCwd}
               threadRef={ctx.threadRef ?? undefined}
               skills={ctx.skills}
-              className="text-secondary-label text-[12px] italic"
+              className="text-[12px]"
             />
-          ) : (
-            <>
-              {toolCode ? (
-                <ChatMarkdown
-                  text={`\`\`\`\`${toolCode.language}\n${toolCode.text}\n\`\`\`\``}
-                  cwd={ctx.markdownCwd}
-                  threadRef={ctx.threadRef ?? undefined}
-                  skills={ctx.skills}
-                  className="text-[12px]"
-                />
-              ) : null}
-              {expandedBody ? (
-                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
-              ) : null}
-              {renderResultAsMarkdown && workEntry.fullOutputText ? (
-                <ChatMarkdown
-                  text={workEntry.fullOutputText}
-                  cwd={ctx.markdownCwd}
-                  threadRef={ctx.threadRef ?? undefined}
-                  skills={ctx.skills}
-                  className="mt-1 text-secondary-label text-[12px]"
-                />
-              ) : null}
-              {hasDiffs ? (
-                <WorkEntryDiffSection
-                  diffs={workEntry.diffs!}
-                  resolvedTheme={ctx.resolvedTheme}
-                  workspaceRoot={workspaceRoot}
-                />
-              ) : null}
-            </>
-          )}
+          ) : null}
+          {expandedBody ? (
+            <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+          ) : null}
+          {renderResultAsMarkdown && workEntry.fullOutputText ? (
+            <ChatMarkdown
+              text={workEntry.fullOutputText}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+              className="mt-1 text-secondary-label text-[12px]"
+            />
+          ) : null}
+          {hasDiffs ? (
+            <WorkEntryDiffSection
+              diffs={diffs}
+              resolvedTheme={ctx.resolvedTheme}
+              workspaceRoot={workspaceRoot}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>

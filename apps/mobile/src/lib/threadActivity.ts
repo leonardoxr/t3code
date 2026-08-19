@@ -31,6 +31,13 @@ export interface PendingUserInputDraftAnswer {
   readonly customAnswer?: string;
 }
 
+/** Inline per-file diff preserved from ACP tool content on `tool.completed`. */
+export interface ThreadFeedDiff {
+  readonly path: string;
+  readonly oldText: string | null;
+  readonly newText: string;
+}
+
 export interface ThreadFeedActivity {
   readonly id: string;
   readonly createdAt: string;
@@ -60,9 +67,31 @@ export interface ThreadFeedActivity {
    * tool call. The row renders it inline from a signed workspace-file asset URL.
    */
   readonly imagePath?: string;
+  /**
+   * Tool output short enough to belong in the flow — the row shows it under
+   * itself with no tap, the way the CLI does. Set only when the text clears
+   * INLINE_OUTPUT_MAX_*; anything larger stays behind the disclosure.
+   */
+  readonly inlineOutput?: string;
+  /**
+   * Per-file diffs small enough (INLINE_DIFF_MAX_*) to render under the row
+   * without a tap.
+   */
+  readonly inlineDiffs?: ReadonlyArray<ThreadFeedDiff>;
 }
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
+
+/**
+ * A handful of output lines or a one-file edit is the payload of the row, and
+ * hiding it behind a tap is what made the timeline read as emptier than the
+ * CLI. Thresholds mirror the web timeline so both surfaces inline the same
+ * rows.
+ */
+const INLINE_OUTPUT_MAX_CHARS = 600;
+const INLINE_OUTPUT_MAX_LINES = 8;
+const INLINE_DIFF_MAX_FILES = 2;
+const INLINE_DIFF_MAX_LINES = 80;
 
 type WorkLogToolLifecycleStatus = "inProgress" | "completed" | "failed" | "declined" | "stopped";
 
@@ -86,6 +115,12 @@ interface WorkLogEntry {
    * extension is one the asset endpoint will sign.
    */
   imagePath?: string;
+  /** Full thought text for `reasoning.completed` rows. */
+  reasoningText?: string;
+  /** Capped multi-line tool output from `data.rawOutput.fullText`. */
+  fullOutputText?: string;
+  /** Inline diffs from `data.diffs` on completed file-change tools. */
+  diffs?: ReadonlyArray<ThreadFeedDiff>;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -108,10 +143,21 @@ type RawThreadFeedEntry =
       readonly createdAt: string;
       readonly turnId: TurnId | null;
       readonly activity: ThreadFeedActivity;
+    }
+  | {
+      /**
+       * Thinking is prose, not a tool row: it renders inline in the flow so
+       * the reasoning is readable without a tap, the way the CLI shows it.
+       */
+      readonly type: "thinking";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly turnId: TurnId | null;
+      readonly text: string;
     };
 
 export type ThreadFeedEntry =
-  | Extract<RawThreadFeedEntry, { type: "message" }>
+  | Extract<RawThreadFeedEntry, { type: "message" | "thinking" }>
   | {
       readonly type: "working";
       readonly id: string;
@@ -407,7 +453,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     ...(taskId ? { taskId } : {}),
     label: taskLabel || activity.summary,
     tone:
-      activity.kind === "task.progress"
+      activity.kind === "task.progress" || activity.kind === "reasoning.completed"
         ? "thinking"
         : activity.tone === "approval"
           ? "info"
@@ -454,6 +500,21 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (requestKind) {
     entry.requestKind = requestKind;
+  }
+  if (activity.kind === "reasoning.completed") {
+    const reasoningText = asTrimmedString(payload?.text);
+    if (reasoningText) {
+      entry.reasoningText = reasoningText;
+    }
+  }
+  const toolPayloadData = asRecord(payload?.data);
+  const fullOutputText = asTrimmedString(asRecord(toolPayloadData?.rawOutput)?.fullText);
+  if (fullOutputText) {
+    entry.fullOutputText = fullOutputText;
+  }
+  const diffs = extractWorkLogDiffs(toolPayloadData?.diffs);
+  if (diffs) {
+    entry.diffs = diffs;
   }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
@@ -533,6 +594,10 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  // The completed row is where the server attaches the full output and the
+  // diffs; a merge must never drop them back to the in-flight row's slim data.
+  const fullOutputText = next.fullOutputText ?? previous.fullOutputText;
+  const diffs = next.diffs ?? previous.diffs;
   return {
     ...previous,
     ...next,
@@ -547,6 +612,8 @@ function mergeDerivedWorkLogEntries(
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolLifecycleStatus ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(fullOutputText ? { fullOutputText } : {}),
+    ...(diffs ? { diffs } : {}),
   };
 }
 
@@ -690,7 +757,9 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
     appendUniqueBlock(`MCP call\n${JSON.stringify(entry.toolData, null, 2)}`);
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
-  appendUniqueBlock(entry.detail);
+  // The capped multi-line output supersedes the one-line detail summary: the
+  // inline preview clamps long lines, so the disclosure has to hold the rest.
+  appendUniqueBlock(entry.fullOutputText ?? entry.detail);
   if ((entry.changedFiles?.length ?? 0) > 0) {
     appendUniqueBlock(entry.changedFiles!.join("\n"));
   }
@@ -702,9 +771,46 @@ function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
   return (
     (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) ||
     Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
-    Boolean(entry.detail?.trim()) ||
+    Boolean((entry.fullOutputText ?? entry.detail)?.trim()) ||
     (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)
   );
+}
+
+/**
+ * Lines a diff side contributes to the inline block. An absent or empty side
+ * (a created file has no old text) renders nothing, so it counts as zero
+ * instead of the single empty line `"".split("\n")` reports. Shared by the
+ * inline threshold here and by the row's rendered-height math.
+ */
+export function inlineDiffSideLineCount(text: string | null): number {
+  return text === null || text.length === 0 ? 0 : text.split("\n").length;
+}
+
+/** The part of a work entry that renders under its row without a tap. */
+function inlineWorkEntryPayload(
+  entry: WorkLogEntry,
+): Pick<ThreadFeedActivity, "inlineOutput" | "inlineDiffs"> {
+  const payload: { inlineOutput?: string; inlineDiffs?: ReadonlyArray<ThreadFeedDiff> } = {};
+  const { fullOutputText, diffs } = entry;
+  if (
+    fullOutputText !== undefined &&
+    fullOutputText.length <= INLINE_OUTPUT_MAX_CHARS &&
+    fullOutputText.split("\n").length <= INLINE_OUTPUT_MAX_LINES
+  ) {
+    payload.inlineOutput = fullOutputText;
+  }
+  if (
+    diffs !== undefined &&
+    diffs.length <= INLINE_DIFF_MAX_FILES &&
+    diffs.reduce(
+      (lines, diff) =>
+        lines + inlineDiffSideLineCount(diff.oldText) + inlineDiffSideLineCount(diff.newText),
+      0,
+    ) <= INLINE_DIFF_MAX_LINES
+  ) {
+    payload.inlineDiffs = diffs;
+  }
+  return payload;
 }
 
 function memoizeValue<T>(build: () => T): () => T {
@@ -1069,6 +1175,30 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return changedFiles;
 }
 
+/**
+ * `data.diffs` on completed file-change tools: the server already caps file
+ * count and per-side size, so this only guards the shape.
+ */
+function extractWorkLogDiffs(value: unknown): ReadonlyArray<ThreadFeedDiff> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const diffs: ThreadFeedDiff[] = [];
+  for (const entryValue of value) {
+    const entry = asRecord(entryValue);
+    const path = asTrimmedString(entry?.path);
+    if (!entry || !path || typeof entry.newText !== "string") {
+      continue;
+    }
+    diffs.push({
+      path,
+      oldText: typeof entry.oldText === "string" ? entry.oldText : null,
+      newText: entry.newText,
+    });
+  }
+  return diffs.length > 0 ? diffs : undefined;
+}
+
 function compareActivityLifecycleRank(kind: string): number {
   if (kind.endsWith(".started") || kind === "tool.started") {
     return 0;
@@ -1169,6 +1299,13 @@ interface ThreadFeedTurnFold {
   readonly createdAt: string;
   readonly hiddenEntryIds: ReadonlySet<string>;
   readonly label: string;
+  /**
+   * The most recent turn keeps its work on screen: you just watched it happen,
+   * and collapsing it the instant it settles hides the answer's provenance.
+   * Older turns fold, so history stays quiet. The fold row itself is always
+   * emitted — it carries the duration readout either way.
+   */
+  readonly defaultExpanded: boolean;
 }
 
 function deriveThreadFeedTurnFolds(
@@ -1196,7 +1333,7 @@ function deriveThreadFeedTurnFolds(
     const turnId =
       entry.type === "message" && entry.message.role === "assistant"
         ? entry.message.turnId
-        : entry.type === "activity-group"
+        : entry.type === "activity-group" || entry.type === "thinking"
           ? entry.turnId
           : null;
     if (!turnId) {
@@ -1269,6 +1406,10 @@ function deriveThreadFeedTurnFolds(
       createdAt: firstEntry.createdAt,
       hiddenEntryIds,
       label,
+      // Only while it is genuinely the tail of the thread: once the user has
+      // sent the next message, this turn is history and must fold without
+      // popping open for the window before the new turn exists.
+      defaultExpanded: pendingUserBoundary === null && latestTurnMatches,
     });
   }
   return foldsByAnchorId;
@@ -1286,15 +1427,25 @@ export function deriveThreadFeedPresentation(
       entry.type !== "turn-fold" && entry.type !== "work-toggle" && entry.type !== "working",
   );
   const foldsByAnchorId = deriveThreadFeedTurnFolds(sourceFeed, latestTurn);
+  // `expandedTurnIds` records a deviation from the fold's default, so one
+  // toggle set drives both directions: it opens a folded old turn and closes
+  // the default-open latest turn.
+  const isFoldExpanded = (fold: ThreadFeedTurnFold): boolean =>
+    expandedTurnIds.has(fold.turnId) !== fold.defaultExpanded;
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
-    if (!expandedTurnIds.has(fold.turnId)) {
+    if (!isFoldExpanded(fold)) {
       for (const entryId of fold.hiddenEntryIds) {
         collapsedEntryIds.add(entryId);
       }
     }
   }
 
+  // The current turn shows every work row: live while it streams, and after it
+  // settles too — you just watched it happen, so hiding the command output and
+  // the diff behind "+N previous" is what made the timeline read as emptier
+  // than the CLI. Older turns condense, and then fold entirely.
+  const currentTurnId = latestTurn?.turnId ?? null;
   const result: ThreadFeedEntry[] = [];
   for (const entry of sourceFeed) {
     const fold = foldsByAnchorId.get(entry.id);
@@ -1305,11 +1456,11 @@ export function deriveThreadFeedPresentation(
         createdAt: fold.createdAt,
         turnId: fold.turnId,
         label: fold.label,
-        expanded: expandedTurnIds.has(fold.turnId),
+        expanded: isFoldExpanded(fold),
       });
     }
     if (!collapsedEntryIds.has(entry.id)) {
-      appendPresentedFeedEntry(result, entry, expandedWorkGroupIds);
+      appendPresentedFeedEntry(result, entry, expandedWorkGroupIds, currentTurnId);
     }
   }
   if (activeWorkStartedAt !== null) {
@@ -1326,6 +1477,7 @@ function appendPresentedFeedEntry(
   result: ThreadFeedEntry[],
   entry: Exclude<ThreadFeedEntry, { readonly type: "turn-fold" | "work-toggle" | "working" }>,
   expandedWorkGroupIds: ReadonlySet<string>,
+  currentTurnId: TurnId | null,
 ): void {
   if (entry.type !== "activity-group") {
     result.push(entry);
@@ -1338,7 +1490,8 @@ function appendPresentedFeedEntry(
   if (activities.length === 0) {
     return;
   }
-  if (activities.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
+  const isCurrentTurnGroup = entry.turnId !== null && entry.turnId === currentTurnId;
+  if (isCurrentTurnGroup || activities.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
     result.push({
       ...entry,
       activities,
@@ -1570,6 +1723,15 @@ export function buildThreadFeed(
           );
         })
         .map<RawThreadFeedEntry>((entry) => {
+          if (entry.reasoningText !== undefined) {
+            return {
+              type: "thinking",
+              id: entry.id,
+              createdAt: entry.createdAt,
+              turnId: entry.turnId,
+              text: entry.reasoningText,
+            };
+          }
           const summary = workEntryHeading(entry);
           const detail = workEntryPreview(entry);
           const getFullDetail = memoizeValue(() => buildWorkEntryExpandedBody(entry));
@@ -1598,6 +1760,7 @@ export function buildThreadFeed(
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
               ...(entry.imagePath ? { imagePath: entry.imagePath } : {}),
+              ...inlineWorkEntryPayload(entry),
             },
           };
         }),

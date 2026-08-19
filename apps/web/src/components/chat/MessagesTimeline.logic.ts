@@ -212,7 +212,8 @@ export type MessagesTimelineRow =
       createdAt: string;
       turnPlan: TurnPlanEntry;
     }
-  | { kind: "working"; id: string; createdAt: string | null };
+  | { kind: "working"; id: string; createdAt: string | null }
+  | { kind: "thinking"; id: string; createdAt: string; text: string; turnId: TurnId | null };
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -290,6 +291,13 @@ interface TurnFold {
   createdAt: string;
   hiddenEntryIds: ReadonlySet<string>;
   label: string;
+  /**
+   * The most recent settled turn keeps its work on screen: you just watched it
+   * happen, and collapsing it the instant it finishes hides the answer's
+   * provenance. Older turns still fold, so history stays quiet. The fold row
+   * itself is always emitted — it carries the duration readout either way.
+   */
+  defaultExpanded: boolean;
 }
 
 /**
@@ -441,6 +449,10 @@ function deriveTurnFolds(input: {
       createdAt: firstEntry.createdAt,
       hiddenEntryIds,
       label,
+      // Only while it is genuinely the tail of the thread: once the user has
+      // sent the next message, this turn is history and must fold without
+      // popping open for the window before the new turn exists.
+      defaultExpanded: pendingUserBoundary === null && input.latestTurn?.turnId === turnId,
     });
   }
   return foldsByAnchorEntryId;
@@ -472,9 +484,14 @@ export function deriveMessagesTimelineRows(input: {
     latestTurn: input.latestTurn ?? null,
     unsettledTurnId,
   });
+  // `expandedTurnIds` records a deviation from the fold's default, so one
+  // toggle set drives both directions: it opens a folded old turn and closes
+  // the default-open latest turn.
+  const isFoldExpanded = (fold: TurnFold): boolean =>
+    (input.expandedTurnIds?.has(fold.turnId) ?? false) !== fold.defaultExpanded;
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorEntryId.values()) {
-    if (!input.expandedTurnIds?.has(fold.turnId)) {
+    if (!isFoldExpanded(fold)) {
       for (const entryId of fold.hiddenEntryIds) {
         collapsedEntryIds.add(entryId);
       }
@@ -495,7 +512,7 @@ export function deriveMessagesTimelineRows(input: {
         createdAt: turnFold.createdAt,
         turnId: turnFold.turnId,
         label: turnFold.label,
-        expanded: input.expandedTurnIds?.has(turnFold.turnId) ?? false,
+        expanded: isFoldExpanded(turnFold),
       });
     }
 
@@ -504,6 +521,19 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "work") {
+      // Thinking is prose, not a tool row: it renders inline in the flow so
+      // the reasoning is readable without a click, the way the CLI shows it.
+      const reasoningText = timelineEntry.entry.reasoningText;
+      if (reasoningText !== undefined) {
+        nextRows.push({
+          kind: "thinking",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          text: reasoningText,
+          turnId: timelineEntry.entry.turnId ?? null,
+        });
+        continue;
+      }
       const groupedEntries = [timelineEntry.entry];
       let cursor = index + 1;
       while (cursor < input.timelineEntries.length) {
@@ -511,6 +541,7 @@ export function deriveMessagesTimelineRows(input: {
         if (
           !nextEntry ||
           nextEntry.kind !== "work" ||
+          nextEntry.entry.reasoningText !== undefined ||
           collapsedEntryIds.has(nextEntry.id) ||
           foldsByAnchorEntryId.has(nextEntry.id)
         ) {
@@ -522,8 +553,16 @@ export function deriveMessagesTimelineRows(input: {
       const visibleGroupedEntries = groupedEntries.filter(
         (entry) => !workEntryIndicatesToolNeutralStatus(entry),
       );
+      // The current turn shows every row: live while it streams, and after it
+      // settles too — you just watched it happen, so hiding the command output
+      // and the diff behind "+N previous" is what made the timeline read as
+      // emptier than the CLI. Older turns condense, and then fold entirely.
+      const groupTurnId = timelineEntry.entry.turnId ?? null;
+      const isCurrentTurnGroup =
+        groupTurnId !== null &&
+        (groupTurnId === unsettledTurnId || groupTurnId === (input.latestTurn?.turnId ?? null));
       if (visibleGroupedEntries.length > 0) {
-        if (visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
+        if (isCurrentTurnGroup || visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
           nextRows.push({
             kind: "work",
             id: timelineEntry.id,
@@ -671,6 +710,11 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   switch (a.kind) {
     case "working":
       return a.createdAt === (b as typeof a).createdAt;
+
+    case "thinking": {
+      const bt = b as typeof a;
+      return a.createdAt === bt.createdAt && a.text === bt.text;
+    }
 
     case "turn-fold": {
       const bf = b as typeof a;
