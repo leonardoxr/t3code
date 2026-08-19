@@ -161,6 +161,8 @@ interface TimelineRowActivityState {
   latestTurnId: TurnId | null;
   /** Current plan step label for the working row, when the turn has a plan. */
   workingStepLabel: string | null;
+  /** Last provider activity when the silence watchdog flagged the session quiet. */
+  providerQuietSince: string | null;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -214,6 +216,7 @@ interface MessagesTimelineProps {
   onOpenAgents?: () => void;
   isWorking: boolean;
   workingStepLabel?: string | null;
+  providerQuietSince?: string | null;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
@@ -258,6 +261,7 @@ interface MessagesTimelineProps {
 export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   workingStepLabel = null,
+  providerQuietSince = null,
   activeTurnInProgress,
   activeTurnStartedAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
@@ -550,8 +554,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       latestTurnId: latestTurn?.turnId ?? null,
       workingStepLabel,
+      providerQuietSince,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestTurn?.turnId, workingStepLabel],
+    [
+      activeTurnInProgress,
+      isRevertingCheckpoint,
+      isWorking,
+      latestTurn?.turnId,
+      workingStepLabel,
+      providerQuietSince,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1287,7 +1299,26 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
 });
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { workingStepLabel } = use(TimelineRowActivityCtx);
+  const { workingStepLabel, providerQuietSince } = use(TimelineRowActivityCtx);
+  if (providerQuietSince) {
+    // The provider has sent nothing for the silence threshold: stop claiming
+    // progress and state what is actually known. Stop stays reachable via
+    // the composer's stop-generation button.
+    return (
+      <div className="py-0.5 pl-1.5">
+        <div className="flex min-w-0 items-center gap-2 pt-1 text-[11px] text-warning tabular-nums">
+          <CircleAlertIcon className="size-3 shrink-0" aria-hidden />
+          <span className="shrink-0">
+            No output from the provider for <WorkingTimer createdAt={providerQuietSince} />
+          </span>
+          <span className="min-w-0 truncate text-secondary-label">
+            · last activity {formatTimeOfDay(providerQuietSince)} — still waiting; you can stop the
+            turn
+          </span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="py-0.5 pl-1.5">
       <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
@@ -1944,6 +1975,14 @@ function formatWorkingTimer(startIso: string, endIso: string): string | null {
 
 function formatWorkingTimerNow(startIso: string): string {
   return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0s";
+}
+
+/** Wall-clock label for the quiet row's "last activity" timestamp. */
+function formatTimeOfDay(iso: string): string {
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime())
+    ? iso
+    : parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 type WorkEntryIconName =

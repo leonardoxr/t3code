@@ -103,6 +103,12 @@ export function useThreadComposerState() {
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const interactionMode = selectedDraft?.interactionMode ?? selectedThread?.interactionMode ?? null;
+  // Belt-and-suspenders next to the server's own clearing: only surface the
+  // provider-quiet timestamp while the session is actually running.
+  const providerQuietSince =
+    selectedThread?.session?.status === "running"
+      ? (selectedThread.session.providerQuietSince ?? null)
+      : null;
 
   const selectedThreadSessionActivity = useMemo(() => {
     const selectedThread = selectedThreadDetail ?? selectedThreadShell;
@@ -299,6 +305,7 @@ export function useThreadComposerState() {
     selectedThreadFeed,
     selectedThreadQueueCount,
     activeWorkStartedAt,
+    providerQuietSince,
     draftMessage,
     draftAttachments,
     modelSelection,

@@ -456,6 +456,87 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBeNull();
   });
 
+  it("carries the silence watchdog flag on the session and clears it on later lifecycle events", async () => {
+    const harness = await createHarness();
+    const quietSince = "2026-01-01T00:05:00.000Z";
+
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-session-quiet-marked"),
+      provider: ProviderDriverKind.make("omp"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:06:15.000Z",
+      payload: {
+        state: "running",
+        providerQuietSince: quietSince,
+      },
+    });
+
+    let thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.providerQuietSince === quietSince,
+    );
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.providerQuietSince).toBe(quietSince);
+
+    // The watchdog's clear transition removes the flag while staying running.
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-session-quiet-cleared"),
+      provider: ProviderDriverKind.make("omp"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:06:45.000Z",
+      payload: {
+        state: "running",
+        providerQuietSince: null,
+      },
+    });
+
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" && entry.session.providerQuietSince === undefined,
+    );
+    expect(thread.session?.providerQuietSince).toBeUndefined();
+
+    // A stall that ends in a settled turn also drops the flag: any other
+    // lifecycle event implies fresh activity and omits the field.
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-session-quiet-remarked"),
+      provider: ProviderDriverKind.make("omp"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:08:00.000Z",
+      payload: {
+        state: "running",
+        providerQuietSince: quietSince,
+      },
+    });
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.providerQuietSince === quietSince,
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-clears-quiet"),
+      provider: ProviderDriverKind.make("omp"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-quiet"),
+      createdAt: "2026-01-01T00:08:30.000Z",
+      payload: {
+        state: "completed",
+      },
+    });
+
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "ready" && entry.session.providerQuietSince === undefined,
+    );
+    expect(thread.session?.providerQuietSince).toBeUndefined();
+  });
+
   it("clears active turn when provider session becomes ready", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

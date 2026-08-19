@@ -2327,6 +2327,13 @@ function ChatViewContent(props: ChatViewProps) {
     latestTurnSettled &&
     hasActionableProposedPlan(activeProposedPlan);
   const activePendingApproval = pendingApprovals[0] ?? null;
+  // Silence flag from the server watchdog. Belt-and-braces suppression: a
+  // pending approval or user-input question means we are waiting on the
+  // human, not the provider, even if the flag races the request open.
+  const providerQuietSince =
+    activeThread?.session?.status === "running" && !activePendingApproval && !activePendingUserInput
+      ? (activeThread.session.providerQuietSince ?? null)
+      : null;
   const {
     beginLocalDispatch,
     resetLocalDispatch,
@@ -6441,6 +6448,7 @@ function ChatViewContent(props: ChatViewProps) {
                 key={activeThread.id}
                 isWorking={isWorking}
                 workingStepLabel={workingStepLabel}
+                providerQuietSince={providerQuietSince}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}

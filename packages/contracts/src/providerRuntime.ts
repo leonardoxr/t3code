@@ -279,6 +279,12 @@ const SessionStateChangedPayload = Schema.Struct({
   state: RuntimeSessionState,
   reason: Schema.optional(TrimmedNonEmptyStringSchema),
   detail: Schema.optional(Schema.Unknown),
+  /**
+   * Provider-silence watchdog transition: an ISO timestamp of the last
+   * observed inbound frame when the provider has gone quiet mid-turn, or
+   * null when frames resumed. Absent on ordinary state changes.
+   */
+  providerQuietSince: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type SessionStateChangedPayload = typeof SessionStateChangedPayload.Type;
 

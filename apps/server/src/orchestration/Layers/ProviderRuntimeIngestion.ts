@@ -1637,6 +1637,14 @@ const make = Effect.gen(function* () {
               : status === "ready"
                 ? null
                 : (thread.session?.lastError ?? null);
+        // Watchdog transitions carry the timestamp explicitly; every other
+        // lifecycle event implies fresh provider activity (or a terminal
+        // state) and clears the flag by omission.
+        const providerQuietSince =
+          event.type === "session.state.changed" &&
+          typeof event.payload.providerQuietSince === "string"
+            ? event.payload.providerQuietSince
+            : undefined;
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -1673,6 +1681,7 @@ const make = Effect.gen(function* () {
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
               lastError,
+              ...(providerQuietSince !== undefined ? { providerQuietSince } : {}),
               updatedAt: now,
             },
             createdAt: now,
