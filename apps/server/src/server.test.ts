@@ -25,6 +25,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type PreviewEvent,
   ProjectId,
+  QueuedFollowUpId,
   ProviderDriverKind,
   ProviderInstanceId,
   ResolvedKeybindingRule,
@@ -6146,6 +6147,82 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[0]?.kind, "snapshot");
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 2);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  // Regression: queued follow-ups render from thread detail, so their events
+  // must reach a live subscriber. When they did not, the queue only appeared
+  // after a page reload — the panel looked completely broken.
+  it.effect("delivers queued follow-up events to a live thread subscription", () =>
+    Effect.gen(function* () {
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const liveEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+      const queuedEvent = {
+        sequence: 2,
+        eventId: EventId.make("event-follow-up-queued"),
+        aggregateKind: "thread",
+        aggregateId: defaultThreadId,
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.follow-up-queued",
+        payload: {
+          threadId: defaultThreadId,
+          followUp: {
+            id: QueuedFollowUpId.make("follow-up-1"),
+            text: "then run the tests",
+            attachments: [],
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            orderKey: "m",
+            status: "pending",
+            lastError: null,
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.follow-up-queued" }>;
+      const pausedEvent = {
+        ...queuedEvent,
+        sequence: 3,
+        eventId: EventId.make("event-follow-up-paused"),
+        type: "thread.follow-up-paused",
+        payload: { threadId: defaultThreadId, pausedAt: "2026-01-01T00:00:02.000Z" },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.follow-up-paused" }>;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            streamDomainEvents: Stream.fromPubSub(liveEvents),
+          },
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshot: () =>
+              Effect.gen(function* () {
+                yield* Effect.sleep("25 millis");
+                yield* PubSub.publish(liveEvents, queuedEvent);
+                yield* PubSub.publish(liveEvents, pausedEvent);
+                return Option.some({ snapshotSequence: 1, thread });
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+          }).pipe(Stream.take(3), Stream.runCollect),
+        ),
+      ).pipe(Effect.timeout("2 seconds"));
+
+      assert.equal(items[0]?.kind, "snapshot");
+      assert.deepEqual(
+        items.slice(1).map((item) => (item.kind === "event" ? item.event.type : item.kind)),
+        ["thread.follow-up-queued", "thread.follow-up-paused"],
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 

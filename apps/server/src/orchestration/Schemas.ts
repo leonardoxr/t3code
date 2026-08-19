@@ -31,6 +31,7 @@ import {
   ThreadFollowUpEditedPayload as ContractsThreadFollowUpEditedPayloadSchema,
   ThreadFollowUpRemovedPayload as ContractsThreadFollowUpRemovedPayloadSchema,
   ThreadFollowUpReorderedPayload as ContractsThreadFollowUpReorderedPayloadSchema,
+  ThreadFollowUpPausedPayload as ContractsThreadFollowUpPausedPayloadSchema,
   ThreadFollowUpFailedPayload as ContractsThreadFollowUpFailedPayloadSchema,
 } from "@t3tools/contracts";
 
@@ -74,4 +75,5 @@ export const ThreadFollowUpQueuedPayload = ContractsThreadFollowUpQueuedPayloadS
 export const ThreadFollowUpEditedPayload = ContractsThreadFollowUpEditedPayloadSchema;
 export const ThreadFollowUpRemovedPayload = ContractsThreadFollowUpRemovedPayloadSchema;
 export const ThreadFollowUpReorderedPayload = ContractsThreadFollowUpReorderedPayloadSchema;
+export const ThreadFollowUpPausedPayload = ContractsThreadFollowUpPausedPayloadSchema;
 export const ThreadFollowUpFailedPayload = ContractsThreadFollowUpFailedPayloadSchema;

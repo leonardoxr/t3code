@@ -952,6 +952,10 @@ const ThreadSessionStopCommand = Schema.Struct({
  * Park a follow-up instead of steering the running turn with it. The canonical
  * form carries persisted attachments; the client form carries uploads, exactly
  * like `thread.turn.start` (see `ClientThreadFollowUpQueueCommand`).
+ *
+ * Queue position is NOT a client input: the decider appends past the current
+ * tail against the serialized read model, so firing several follow-ups faster
+ * than the queue round-trips cannot land them all on the same key.
  */
 const ThreadFollowUpQueueCommand = Schema.Struct({
   type: Schema.Literal("thread.follow-up.queue"),
@@ -963,7 +967,6 @@ const ThreadFollowUpQueueCommand = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
-  orderKey: TrimmedNonEmptyString,
   createdAt: IsoDateTime,
 });
 
@@ -977,7 +980,6 @@ const ClientThreadFollowUpQueueCommand = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
-  orderKey: TrimmedNonEmptyString,
   createdAt: IsoDateTime,
 });
 
@@ -1229,6 +1231,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.follow-up-edited",
   "thread.follow-up-removed",
   "thread.follow-up-reordered",
+  "thread.follow-up-paused",
   "thread.follow-up-failed",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
@@ -1469,6 +1472,17 @@ export const ThreadFollowUpQueuedPayload = Schema.Struct({
   followUp: OrchestrationQueuedFollowUp,
 });
 
+/**
+ * The queue was held because the user stopped or interrupted the run. An
+ * explicit fact rather than something each consumer re-derives from the
+ * interrupt: intent events are not delivered to thread subscriptions, so a
+ * derived pause would never reach a live client.
+ */
+export const ThreadFollowUpPausedPayload = Schema.Struct({
+  threadId: ThreadId,
+  pausedAt: IsoDateTime,
+});
+
 export const ThreadFollowUpEditedPayload = Schema.Struct({
   threadId: ThreadId,
   followUpId: QueuedFollowUpId,
@@ -1686,6 +1700,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.follow-up-reordered"),
     payload: ThreadFollowUpReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-paused"),
+    payload: ThreadFollowUpPausedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -1255,13 +1255,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         // Stop and interrupt pause the queue rather than firing into the gap the
         // user just made: pressing stop has to stop what happens next too.
-        case "thread.turn-interrupt-requested":
-        case "thread.session-stop-requested":
+        case "thread.follow-up-paused":
           yield* projectionThreadQueuedFollowUpRepository.setStatusByThreadId({
             threadId: event.payload.threadId,
             fromStatus: "pending",
             toStatus: "paused",
-            updatedAt: event.payload.createdAt,
+            updatedAt: event.payload.pausedAt,
           });
           return;
 

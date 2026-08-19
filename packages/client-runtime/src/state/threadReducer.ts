@@ -259,18 +259,12 @@ export function applyThreadDetailEvent(
       };
 
     case "thread.turn-interrupt-requested": {
-      // Stop has to stop what happens next too, so the queue pauses even when
-      // the interrupt names no turn.
-      const queuedFollowUps = pauseQueuedFollowUps(thread.queuedFollowUps, event.occurredAt);
+      if (event.payload.turnId === undefined) {
+        return { kind: "unchanged" };
+      }
       const latestTurn = thread.latestTurn;
-      const interruptsLatestTurn =
-        event.payload.turnId !== undefined &&
-        latestTurn !== null &&
-        latestTurn.turnId === event.payload.turnId;
-      if (!interruptsLatestTurn) {
-        return queuedFollowUps === thread.queuedFollowUps
-          ? { kind: "unchanged" }
-          : { kind: "updated", thread: { ...thread, queuedFollowUps } };
+      if (latestTurn === null || latestTurn.turnId !== event.payload.turnId) {
+        return { kind: "unchanged" };
       }
       return {
         kind: "updated",
@@ -282,7 +276,6 @@ export function applyThreadDetailEvent(
             startedAt: latestTurn.startedAt ?? event.payload.createdAt,
             completedAt: latestTurn.completedAt ?? event.payload.createdAt,
           },
-          queuedFollowUps,
           updatedAt: event.occurredAt,
         },
       };
@@ -434,28 +427,22 @@ export function applyThreadDetailEvent(
       };
     }
 
-    case "thread.session-stop-requested": {
-      const queuedFollowUps = pauseQueuedFollowUps(thread.queuedFollowUps, event.occurredAt);
-      if (thread.session === null) {
-        return queuedFollowUps === thread.queuedFollowUps
-          ? { kind: "unchanged" }
-          : { kind: "updated", thread: { ...thread, queuedFollowUps } };
-      }
-      return {
-        kind: "updated",
-        thread: {
-          ...thread,
-          session: {
-            ...thread.session,
-            status: "stopped",
-            activeTurnId: null,
-            updatedAt: event.payload.createdAt,
-          },
-          queuedFollowUps,
-          updatedAt: event.occurredAt,
-        },
-      };
-    }
+    case "thread.session-stop-requested":
+      return thread.session === null
+        ? { kind: "unchanged" }
+        : {
+            kind: "updated",
+            thread: {
+              ...thread,
+              session: {
+                ...thread.session,
+                status: "stopped",
+                activeTurnId: null,
+                updatedAt: event.payload.createdAt,
+              },
+              updatedAt: event.occurredAt,
+            },
+          };
 
     // ── Proposed plans ──────────────────────────────────────────────
     case "thread.proposed-plan-upserted": {
@@ -654,6 +641,17 @@ export function applyThreadDetailEvent(
           updatedAt: event.occurredAt,
         },
       };
+
+    case "thread.follow-up-paused": {
+      // Stop has to stop what happens next too.
+      const queuedFollowUps = pauseQueuedFollowUps(thread.queuedFollowUps, event.payload.pausedAt);
+      return queuedFollowUps === thread.queuedFollowUps
+        ? { kind: "unchanged" }
+        : {
+            kind: "updated",
+            thread: { ...thread, queuedFollowUps, updatedAt: event.occurredAt },
+          };
+    }
 
     case "thread.follow-up-failed":
       return {

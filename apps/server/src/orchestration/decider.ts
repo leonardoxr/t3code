@@ -7,6 +7,7 @@ import {
   type OrchestrationReadModel,
   type OrchestrationThread,
 } from "@t3tools/contracts";
+import { orderKeyBetween } from "@t3tools/shared/orderKey";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -228,6 +229,40 @@ const threadLifecycleResetEvents = Effect.fn("threadLifecycleResetEvents")(funct
     });
   }
   return events;
+});
+
+/**
+ * Stopping or interrupting holds the queue: pressing stop has to stop what
+ * happens next too. Emitted as its own fact because thread subscriptions never
+ * deliver intent events, so a client re-deriving the pause from the interrupt
+ * would never see it.
+ */
+const queuePausedEvents = Effect.fn("queuePausedEvents")(function* (input: {
+  readonly thread: OrchestrationThread;
+  readonly command: Pick<OrchestrationCommand, "commandId"> & { readonly createdAt: string };
+}): Effect.fn.Return<
+  ReadonlyArray<PlannedOrchestrationEvent>,
+  PlatformError.PlatformError,
+  Crypto.Crypto
+> {
+  if (!(input.thread.queuedFollowUps ?? []).some((followUp) => followUp.status === "pending")) {
+    return [];
+  }
+  return [
+    {
+      ...(yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: input.thread.id,
+        occurredAt: input.command.createdAt,
+        commandId: input.command.commandId,
+      })),
+      type: "thread.follow-up-paused",
+      payload: {
+        threadId: input.thread.id,
+        pausedAt: input.command.createdAt,
+      },
+    },
+  ];
 });
 
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
@@ -1055,25 +1090,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.turn-interrupt-requested",
-        payload: {
-          threadId: command.threadId,
-          ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
-          createdAt: command.createdAt,
+      return [
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.turn-interrupt-requested",
+          payload: {
+            threadId: command.threadId,
+            ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+            createdAt: command.createdAt,
+          },
         },
-      };
+        ...(yield* queuePausedEvents({ thread, command })),
+      ];
     }
 
     case "thread.approval.respond": {
@@ -1181,19 +1219,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           );
         }
       }
-      return {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.session-stop-requested",
-        payload: {
-          threadId: command.threadId,
-          createdAt: command.createdAt,
+      return [
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.session-stop-requested",
+          payload: {
+            threadId: command.threadId,
+            createdAt: command.createdAt,
+          },
         },
-      };
+        ...(yield* queuePausedEvents({ thread, command })),
+      ];
     }
 
     case "thread.follow-up.queue": {
@@ -1212,6 +1253,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `thread ${command.threadId} already has ${MAX_QUEUED_FOLLOW_UPS_PER_THREAD} queued follow-ups`,
+        });
+      }
+      // Append past the current tail. Decided here, against the serialized read
+      // model, so a burst of follow-ups cannot collide on one key the way a
+      // client computing keys from its own (possibly stale) copy would.
+      const tailOrderKey = (thread.queuedFollowUps ?? []).reduce<string | null>(
+        (tail, followUp) =>
+          tail === null || followUp.orderKey.localeCompare(tail) > 0 ? followUp.orderKey : tail,
+        null,
+      );
+      const orderKey = orderKeyBetween(tailOrderKey, null);
+      if (orderKey === null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has a corrupt queued follow-up order key '${tailOrderKey ?? ""}'`,
         });
       }
       return {
@@ -1233,7 +1289,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               : {}),
             runtimeMode: command.runtimeMode,
             interactionMode: command.interactionMode,
-            orderKey: command.orderKey,
+            orderKey,
             status: "pending",
             lastError: null,
             createdAt: command.createdAt,

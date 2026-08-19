@@ -547,11 +547,8 @@ export function sortThreadsForSidebar<
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
-export {
-  generateSpreadPinOrderKeys,
-  pinOrderKeyBetween,
-  planPinnedReorder,
-} from "@t3tools/client-runtime/state/thread-sort";
+export { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+export { generateSpreadOrderKeys, orderKeyBetween } from "@t3tools/shared/orderKey";
 export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
 
 /**

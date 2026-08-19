@@ -102,7 +102,6 @@ engineLayer("queued follow-up projection", (it) => {
         modelSelection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet-9" },
         runtimeMode: "approval-required",
         interactionMode: "plan",
-        orderKey: "m",
         createdAt: NOW,
       });
 
@@ -154,7 +153,7 @@ engineLayer("queued follow-up projection", (it) => {
       const threadId = ThreadId.make("thread-queue-pause");
       yield* seedThread(threadId);
 
-      for (const [index, orderKey] of ["b", "m"].entries()) {
+      for (const index of [0, 1]) {
         yield* engine.dispatch({
           type: "thread.follow-up.queue",
           commandId: CommandId.make(`cmd-queue-pause-${index}`),
@@ -164,7 +163,6 @@ engineLayer("queued follow-up projection", (it) => {
           attachments: [],
           runtimeMode: "full-access",
           interactionMode: "default",
-          orderKey,
           createdAt: NOW,
         });
       }
@@ -225,7 +223,6 @@ engineLayer("queued follow-up projection", (it) => {
         attachments: [],
         runtimeMode: "full-access",
         interactionMode: "default",
-        orderKey: "m",
         createdAt: NOW,
       });
       yield* engine.dispatch({

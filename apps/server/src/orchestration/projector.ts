@@ -20,6 +20,7 @@ import {
   ThreadFollowUpQueuedPayload,
   ThreadFollowUpRemovedPayload,
   ThreadFollowUpReorderedPayload,
+  ThreadFollowUpPausedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
@@ -964,27 +965,26 @@ export function projectEvent(
         }),
       );
 
-    // Stop and interrupt pause the queue rather than firing into the gap the
-    // user just made: pressing stop has to stop what happens next too. Derived
-    // here instead of commanded, so there is one source of truth for "held".
-    case "thread.turn-interrupt-requested":
-    case "thread.session-stop-requested": {
-      const threadId = event.payload.threadId;
-      const thread = nextBase.threads.find((entry) => entry.id === threadId);
-      if (!thread || (thread.queuedFollowUps ?? []).every((entry) => entry.status !== "pending")) {
-        return Effect.succeed(nextBase);
-      }
-      return Effect.succeed({
-        ...nextBase,
-        threads: updateThread(nextBase.threads, threadId, {
-          queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
-            entry.status === "pending"
-              ? { ...entry, status: "paused" as const, updatedAt: event.occurredAt }
-              : entry,
-          ),
+    case "thread.follow-up-paused":
+      return decodeForEvent(ThreadFollowUpPausedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedFollowUps: (thread.queuedFollowUps ?? []).map((entry) =>
+                entry.status === "pending"
+                  ? { ...entry, status: "paused" as const, updatedAt: payload.pausedAt }
+                  : entry,
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
         }),
-      });
-    }
+      );
 
     default:
       return Effect.succeed(nextBase);

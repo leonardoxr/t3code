@@ -52,7 +52,6 @@ it.layer(TestLayer)("normalizeDispatchCommand: queued follow-ups", (it) => {
         modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
         runtimeMode: "full-access",
         interactionMode: "default",
-        orderKey: "m",
         createdAt: NOW,
       };
 

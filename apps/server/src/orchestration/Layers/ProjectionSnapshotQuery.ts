@@ -1224,7 +1224,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             'thread.activity-appended',
             'thread.turn-diff-completed',
             'thread.reverted',
-            'thread.session-set'
+            'thread.session-set',
+            'thread.follow-up-queued',
+            'thread.follow-up-edited',
+            'thread.follow-up-removed',
+            'thread.follow-up-reordered',
+            'thread.follow-up-paused',
+            'thread.follow-up-failed'
           )
       `,
   });

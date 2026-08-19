@@ -1,5 +1,5 @@
 import type { OrchestrationQueuedFollowUp, QueuedFollowUpId } from "@t3tools/contracts";
-import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
+import { orderKeyBetween } from "@t3tools/shared/orderKey";
 import {
   DndContext,
   type DragEndEvent,
@@ -104,7 +104,7 @@ export const ComposerQueuedFollowUps = memo(function ComposerQueuedFollowUps({
     const before = toIndex > fromIndex ? withoutMoved[toIndex] : withoutMoved[toIndex - 1];
     const after = toIndex > fromIndex ? withoutMoved[toIndex + 1] : withoutMoved[toIndex];
     // One fractional key for the moved item; neighbors are never rewritten.
-    const orderKey = pinOrderKeyBetween(before?.orderKey ?? null, after?.orderKey ?? null);
+    const orderKey = orderKeyBetween(before?.orderKey ?? null, after?.orderKey ?? null);
     if (orderKey === null) return;
     const moved = ordered.find((followUp) => followUp.id === activeId);
     if (moved === undefined) return;

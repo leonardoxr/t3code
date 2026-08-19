@@ -9,10 +9,10 @@ import { showConfirmDialog } from "../../components/ConfirmDialogHost";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import {
-  pinOrderKeyBetween,
   planPinnedMove,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
+import { orderKeyBetween } from "@t3tools/shared/orderKey";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
@@ -371,7 +371,7 @@ export function useThreadListActions(): {
           if (shell.pinnedAt == null || shell.pinOrderKey == null) continue;
           if (firstKey === null || shell.pinOrderKey < firstKey) firstKey = shell.pinOrderKey;
         }
-        orderKey = pinOrderKeyBetween(null, firstKey) ?? undefined;
+        orderKey = orderKeyBetween(null, firstKey) ?? undefined;
       }
       const result = await pinMutation({
         environmentId: thread.environmentId,

@@ -124,7 +124,6 @@ import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
-import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
@@ -5488,16 +5487,8 @@ function ChatViewContent(props: ChatViewProps) {
       setThreadError(activeThread.id, "Failed to read an image attachment.");
       return;
     }
-    // Append: one fractional key past the current tail, so a queue never
-    // reorders itself just because something was added.
-    const lastOrderKey = [...queuedFollowUps]
-      .toSorted((left, right) => left.orderKey.localeCompare(right.orderKey))
-      .at(-1)?.orderKey;
-    const orderKey = pinOrderKeyBetween(lastOrderKey ?? null, null);
-    if (orderKey === null) {
-      setThreadError(activeThread.id, "Failed to order the queued follow-up.");
-      return;
-    }
+    // Queue position is the server's call: it appends against the authoritative
+    // queue, so firing several follow-ups in a row cannot collide.
     const result = await queueThreadFollowUp({
       environmentId,
       input: {
@@ -5508,7 +5499,6 @@ function ChatViewContent(props: ChatViewProps) {
         ...(sendCtx.selectedModel ? { modelSelection: sendCtx.selectedModelSelection } : {}),
         runtimeMode,
         interactionMode,
-        orderKey,
       },
     });
     if (result._tag === "Failure") {

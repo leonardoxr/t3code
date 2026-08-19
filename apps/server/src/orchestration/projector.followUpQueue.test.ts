@@ -144,14 +144,14 @@ describe("orchestration projector: queued follow-ups", () => {
     }),
   );
 
-  it.effect("pauses pending follow-ups on an interrupt and on a session stop", () =>
+  it.effect("pauses pending follow-ups when the queue is paused", () =>
     Effect.gen(function* () {
       const interrupted = yield* applyEvents([
         queuedEvent({ sequence: 1, id: "follow-up-1", orderKey: "b" }),
         makeEvent({
           sequence: 2,
-          type: "thread.turn-interrupt-requested",
-          payload: { threadId: THREAD_ID, createdAt: NOW },
+          type: "thread.follow-up-paused",
+          payload: { threadId: THREAD_ID, pausedAt: NOW },
         }),
       ]);
       expect(interrupted.threads[0]?.queuedFollowUps?.[0]?.status).toBe("paused");
@@ -160,8 +160,8 @@ describe("orchestration projector: queued follow-ups", () => {
         queuedEvent({ sequence: 1, id: "follow-up-1", orderKey: "b" }),
         makeEvent({
           sequence: 2,
-          type: "thread.session-stop-requested",
-          payload: { threadId: THREAD_ID, createdAt: NOW },
+          type: "thread.follow-up-paused",
+          payload: { threadId: THREAD_ID, pausedAt: NOW },
         }),
       ]);
       expect(stopped.threads[0]?.queuedFollowUps?.[0]?.status).toBe("paused");
@@ -174,8 +174,8 @@ describe("orchestration projector: queued follow-ups", () => {
         queuedEvent({ sequence: 1, id: "follow-up-1", orderKey: "b" }),
         makeEvent({
           sequence: 2,
-          type: "thread.session-stop-requested",
-          payload: { threadId: THREAD_ID, createdAt: NOW },
+          type: "thread.follow-up-paused",
+          payload: { threadId: THREAD_ID, pausedAt: NOW },
         }),
         queuedEvent({ sequence: 3, id: "follow-up-2", orderKey: "m" }),
       ]);
@@ -193,8 +193,8 @@ describe("orchestration projector: queued follow-ups", () => {
         queuedEvent({ sequence: 2, id: "follow-up-2", orderKey: "m" }),
         makeEvent({
           sequence: 3,
-          type: "thread.turn-interrupt-requested",
-          payload: { threadId: THREAD_ID, createdAt: NOW },
+          type: "thread.follow-up-paused",
+          payload: { threadId: THREAD_ID, pausedAt: NOW },
         }),
       ]);
       expect(paused.threads[0]?.queuedFollowUps?.map((followUp) => followUp.status)).toEqual([

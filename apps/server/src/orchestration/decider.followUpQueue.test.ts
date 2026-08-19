@@ -91,7 +91,6 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
           attachments: [],
           runtimeMode: "auto",
           interactionMode: "plan",
-          orderKey: "m",
           createdAt: NOW,
         },
         readModel: makeReadModel({}),
@@ -113,6 +112,40 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
     }),
   );
 
+  // Regression: the client used to compute the append key from its own copy of
+  // the queue, so a burst of follow-ups (or a client that had not received the
+  // queue yet) landed several items on the same key and the order went to the
+  // id tiebreak. The decider owns queue position now.
+  it.effect("appends past the current tail instead of trusting a client key", () =>
+    Effect.gen(function* () {
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.follow-up.queue",
+          commandId: CommandId.make("cmd-queue-append"),
+          threadId: THREAD_ID,
+          followUpId: QueuedFollowUpId.make("follow-up-new"),
+          text: "and then deploy",
+          attachments: [],
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel({
+          queuedFollowUps: [
+            makeQueuedFollowUp({ id: "follow-up-1", orderKey: "b" }),
+            makeQueuedFollowUp({ id: "follow-up-2", orderKey: "n" }),
+          ],
+        }),
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+      if (events[0]?.type !== "thread.follow-up-queued") {
+        throw new Error("Expected a thread.follow-up-queued event.");
+      }
+      const orderKey = events[0].payload.followUp.orderKey;
+      expect(orderKey.localeCompare("n")).toBeGreaterThan(0);
+    }),
+  );
+
   it.effect("rejects a queue past the per-thread cap", () =>
     Effect.gen(function* () {
       const queuedFollowUps = Array.from({ length: MAX_QUEUED_FOLLOW_UPS_PER_THREAD }, (_, index) =>
@@ -128,7 +161,6 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
           attachments: [],
           runtimeMode: "full-access",
           interactionMode: "default",
-          orderKey: "z",
           createdAt: NOW,
         },
         readModel: makeReadModel({ queuedFollowUps }),

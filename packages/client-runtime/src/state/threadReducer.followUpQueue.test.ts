@@ -139,31 +139,22 @@ describe("applyThreadDetailEvent: queued follow-ups", () => {
     ]);
   });
 
-  it("pauses pending follow-ups when the user interrupts or stops", () => {
-    const interrupted = expectUpdated(
+  it("pauses pending follow-ups when the queue is paused", () => {
+    const paused = expectUpdated(
       applyThreadDetailEvent(makeThread([makeFollowUp()]), {
         ...baseEventFields,
-        type: "thread.turn-interrupt-requested",
-        payload: { threadId: THREAD_ID, createdAt: LATER },
+        type: "thread.follow-up-paused",
+        payload: { threadId: THREAD_ID, pausedAt: LATER },
       }),
     );
-    expect(interrupted.queuedFollowUps?.[0]?.status).toBe("paused");
-
-    const stopped = expectUpdated(
-      applyThreadDetailEvent(makeThread([makeFollowUp()]), {
-        ...baseEventFields,
-        type: "thread.session-stop-requested",
-        payload: { threadId: THREAD_ID, createdAt: LATER },
-      }),
-    );
-    expect(stopped.queuedFollowUps?.[0]?.status).toBe("paused");
+    expect(paused.queuedFollowUps?.[0]).toMatchObject({ status: "paused", updatedAt: LATER });
   });
 
-  it("reports unchanged for an interrupt that touches neither turn nor queue", () => {
+  it("reports unchanged when nothing was pending to pause", () => {
     const result = applyThreadDetailEvent(makeThread([makeFollowUp({ status: "paused" })]), {
       ...baseEventFields,
-      type: "thread.turn-interrupt-requested",
-      payload: { threadId: THREAD_ID, createdAt: LATER },
+      type: "thread.follow-up-paused",
+      payload: { threadId: THREAD_ID, pausedAt: LATER },
     });
     expect(result.kind).toBe("unchanged");
   });
