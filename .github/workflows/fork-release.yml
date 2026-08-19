@@ -13,12 +13,22 @@
 # bundles this fork's server + web client, so a desktop-only release ships
 # everything.
 #
-# Ritual: pick a version in the fork range (0.100.x — disjoint from upstream
-# 0.0.x so npm `t3@<version>` never resolves), then either push a tag
-# `v0.100.N` or run this workflow manually with the version input.
+# Ritual: none. Every push to `main-xavier` publishes the next patch in the
+# fork range (0.100.x — disjoint from upstream 0.0.x so npm `t3@<version>`
+# never resolves) and the installed app picks it up through the update pill.
+# Push a `v0.100.N` tag or dispatch with a version input to pin an exact
+# number instead. Tags are the version ledger; nothing is committed.
+#
+# Rapid merges collapse: a branch push cancels a release still building, so
+# only the newest commit ships and the skipped numbers stay unused.
 #
 # The upstream `Release` workflow must stay disabled in this repository
 # (`gh workflow disable Release`) so `v*.*.*` tags only trigger this one.
+#
+# The `preflight` job below is this fork's only automated gate: `pull_request`
+# events have never fired here (the `CI` workflow has 0 runs all-time, while
+# `pull_request_target` jobs like PR Size do run), so merges land unvalidated
+# unless a release checks them.
 #
 # Known tradeoffs of the unsigned personal build:
 # - macOS: Gatekeeper quarantine on first install (right-click → Open, or
@@ -31,18 +41,23 @@ name: Fork Release
 
 on:
   push:
+    branches:
+      - main-xavier
     tags:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (for example 0.100.0)"
-        required: true
+        description: "Release version (default: next patch in the fork series)"
+        required: false
         type: string
 
 concurrency:
   group: fork-release
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+env:
+  FORK_VERSION_SERIES: "0.100"
 
 jobs:
   version:
@@ -53,23 +68,82 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
+      # Tags are the ledger the auto version reads, so full history is
+      # required. The concurrency group serializes runs, so a queued push
+      # always sees the previous release's tag and cannot reuse its number.
+      - name: Checkout tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: false
+
       - name: Resolve release version
         id: meta
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            version="${{ inputs.version }}"
-          else
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
+          else
+            version="${INPUT_VERSION:-}"
+          fi
+          if [[ -z "$version" ]]; then
+            latest="$(git tag --list "v${FORK_VERSION_SERIES}.*" --sort=-v:refname | head -n 1)"
+            if [[ -n "$latest" ]]; then
+              version="${FORK_VERSION_SERIES}.$(( ${latest##*.} + 1 ))"
+            else
+              version="${FORK_VERSION_SERIES}.0"
+            fi
           fi
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release version: $version (expected plain semver; prerelease" >&2
             echo "suffixes are rejected by the updater's latest channel)." >&2
             exit 1
           fi
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "Tag v$version already exists — pass an explicit version input." >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  # Releasing on every push means a bad merge would auto-update the installed
+  # app, so the tree must be green before anything is published. This runs
+  # alongside the platform builds; only publishing waits on it.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Typecheck
+        run: vpr typecheck
+
+      - name: Test
+        run: vp run test
 
   build:
     name: Build ${{ matrix.label }}
@@ -181,7 +255,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [version, build]
+    needs: [version, build, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
