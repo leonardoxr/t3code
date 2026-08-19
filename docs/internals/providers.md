@@ -28,6 +28,14 @@ The `omp` driver wraps the Oh My Pi CLI (`omp`, npm package `@oh-my-pi/pi-coding
 ACP-based: the adapter spawns `omp acp` and speaks the Agent Client Protocol via
 `packages/effect-acp`.
 
+When the upstream model provider answers `429`, omp prints the raw error as the whole assistant
+message and still ends the turn with `end_turn`, which would record a success whose only content is
+an error blob. `OmpAdapter` recognizes that message (`parseOmpRateLimitNotice`, strict: the notice
+must BE the message, so an agent quoting a 429 stays prose) and settles the turn as `failed`,
+carrying `rateLimitResetsAt` on `turn.completed`. Ingestion turns that into a `turn.rate-limited`
+activity, and the web working row labels the wait with the reset time instead of spinning silently
+while omp backs off.
+
 ## Registry and routing
 
 Two registries separate configuration from live processes:
