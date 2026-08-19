@@ -114,6 +114,7 @@ import { Separator } from "../ui/separator";
 import {
   getComposerPromptLengthValidationMessage,
   getComposerSubmissionValidationMessage,
+  resolveFollowUpDelivery,
   submitComposerDraft,
 } from "./composerSubmission";
 import { ComposerPromptLengthValidation } from "./ComposerPromptLengthValidation";
@@ -225,7 +226,7 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
-import type { UnifiedSettings } from "@t3tools/contracts/settings";
+import type { FollowUpBehavior, UnifiedSettings } from "@t3tools/contracts/settings";
 import type { SessionPhase, Thread } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
@@ -416,8 +417,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   hasSendableContent: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
   showSendWhileRunning?: boolean;
-  onQueueFollowUp: () => void;
-  queueFollowUpShortcutLabel: string | null;
+  followUpBehavior: FollowUpBehavior;
+  onFollowUpOverride: () => void;
+  followUpOverrideShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -447,8 +449,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         hasSendableContent={props.hasSendableContent}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         showSendWhileRunning={props.showSendWhileRunning ?? false}
-        onQueueFollowUp={props.onQueueFollowUp}
-        queueFollowUpShortcutLabel={props.queueFollowUpShortcutLabel}
+        followUpBehavior={props.followUpBehavior}
+        onFollowUpOverride={props.onFollowUpOverride}
+        followUpOverrideShortcutLabel={props.followUpOverrideShortcutLabel}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -585,7 +588,10 @@ export interface ChatComposerProps {
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
   /** Parks the draft as a queued follow-up instead of steering the live turn. */
-  onQueueFollowUp: (e?: { preventDefault: () => void }) => void;
+  onQueueFollowUp: (
+    e?: { preventDefault: () => void },
+    options?: { readonly sendNext?: boolean },
+  ) => void;
   queuedFollowUps: ReadonlyArray<OrchestrationQueuedFollowUp>;
   onEditQueuedFollowUp: (followUpId: QueuedFollowUpId, text: string) => void;
   onRemoveQueuedFollowUp: (followUpId: QueuedFollowUpId) => void;
@@ -909,6 +915,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ChatView forces the effective mode to "default", so hiding the toggle
   // can't trap anyone in plan mode.
   const planModeUiEnabled = settings.planModeEnabled;
+  const followUpBehavior = settings.followUpBehavior;
   const composerProviderControls = useMemo(
     () => ({
       showInteractionModeToggle:
@@ -1857,12 +1864,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   /**
    * The one funnel every composer submit goes through, so a click and a
-   * keystroke can never diverge. `delivery` picks what the draft becomes:
-   * "send" steers a live turn (today's behavior), "queue" parks it as a
-   * follow-up for when the thread goes idle.
+   * keystroke can never diverge. `override` is the one-off chord: it flips
+   * between queueing and sending now (see `resolveFollowUpDelivery`).
    */
   const submitComposer = useCallback(
-    (event?: { preventDefault: () => void }, delivery: "send" | "queue" = "send") => {
+    (event?: { preventDefault: () => void }, options?: { readonly override?: boolean }) => {
       if (noProviderAvailable || isSendDisabled) {
         event?.preventDefault();
         return;
@@ -1880,6 +1886,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         return;
       }
+      const delivery = resolveFollowUpDelivery({
+        behavior: followUpBehavior,
+        isRunning: phase === "running",
+        override: options?.override === true,
+      });
       const submission = submitComposerDraft({
         prompt: promptRef.current,
         submissionTarget: activePendingProgress ? "pending-user-input" : "provider-turn",
@@ -1888,10 +1899,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           // ChatView reports its final composed-input preflight through the
           // composer handle before its first asynchronous send step.
           providerInputRejectedRef.current = false;
-          if (delivery === "queue") {
+          if (delivery === "send") {
+            onSend(sendEvent);
+          } else if (delivery === "queue") {
             onQueueFollowUp(sendEvent);
           } else {
-            onSend(sendEvent);
+            // Stop the run, then let the queue's idle gate deliver this the
+            // moment the turn actually ends — no client-side waiting, and no
+            // send racing a still-running turn into a steer. Dispatches are
+            // serialized per thread, so the interrupt lands first.
+            onInterrupt();
+            onQueueFollowUp(sendEvent, { sendNext: true });
           }
           return !providerInputRejectedRef.current;
         },
@@ -1906,10 +1924,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activeThreadId,
       activePendingProgress,
       blurMobileComposerAfterSend,
+      followUpBehavior,
       isSendDisabled,
       noProviderAvailable,
+      onInterrupt,
       onQueueFollowUp,
       onSend,
+      phase,
       promptRef,
       shouldBlurMobileComposerOnSubmit,
     ],
@@ -2352,7 +2373,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   // ------------------------------------------------------------------
-  // Queue this follow-up (⌘⇧↵)
+  // Follow-up override chord (⌘⇧↵): do the opposite for one message
   // ------------------------------------------------------------------
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
@@ -2363,9 +2384,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           modelPickerOpen: isComposerModelPickerOpen,
         },
       });
-      if (command !== "composer.queueFollowUp") return;
+      if (command !== "composer.followUpOverride") return;
       // Claim the chord unconditionally: letting it through would insert a
-      // newline in the composer instead of queueing.
+      // newline in the composer instead of submitting.
       event.preventDefault();
       event.stopPropagation();
       if (
@@ -2377,7 +2398,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ) {
         return;
       }
-      submitComposer(undefined, "queue");
+      submitComposer(undefined, { override: true });
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -2562,11 +2583,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
   }, [onInterrupt]);
-  const handleQueueFollowUpPrimaryAction = useCallback(() => {
-    submitComposer(undefined, "queue");
+  // The secondary primary-action always offers the opposite of what Enter will
+  // do, so the choice is visible without opening Settings.
+  const handleFollowUpOverridePrimaryAction = useCallback(() => {
+    submitComposer(undefined, { override: true });
   }, [submitComposer]);
-  const queueFollowUpShortcutLabel = useMemo(
-    () => shortcutLabelForCommand(keybindings, "composer.queueFollowUp"),
+  const followUpOverrideShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "composer.followUpOverride"),
     [keybindings],
   );
   const handleImplementPlanInNewThreadPrimaryAction = useCallback(() => {
@@ -2898,8 +2921,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
-                      onQueueFollowUp={handleQueueFollowUpPrimaryAction}
-                      queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
+                      onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                      followUpBehavior={followUpBehavior}
+                      followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3195,8 +3219,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={false}
                     hasSendableContent={false}
                     preserveComposerFocusOnPointerDown
-                    onQueueFollowUp={handleQueueFollowUpPrimaryAction}
-                    queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
+                    onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                    followUpBehavior={followUpBehavior}
+                    followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3326,8 +3351,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   hasSendableContent={composerSendState.hasSendableContent}
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   showSendWhileRunning={isMobileViewport}
-                  onQueueFollowUp={handleQueueFollowUpPrimaryAction}
-                  queueFollowUpShortcutLabel={queueFollowUpShortcutLabel}
+                  onFollowUpOverride={handleFollowUpOverridePrimaryAction}
+                  followUpBehavior={followUpBehavior}
+                  followUpOverrideShortcutLabel={followUpOverrideShortcutLabel}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

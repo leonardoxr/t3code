@@ -37,8 +37,9 @@ function renderPendingActions(isRunning: boolean) {
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent: false,
-      onQueueFollowUp: () => {},
-      queueFollowUpShortcutLabel: "⌘⇧↵",
+      followUpBehavior: "steer",
+      onFollowUpOverride: () => {},
+      followUpOverrideShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -60,8 +61,9 @@ function renderStandaloneStop() {
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent: false,
-      onQueueFollowUp: () => {},
-      queueFollowUpShortcutLabel: "⌘⇧↵",
+      followUpBehavior: "steer",
+      onFollowUpOverride: () => {},
+      followUpOverrideShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -69,7 +71,11 @@ function renderStandaloneStop() {
   );
 }
 
-function renderRunningActions(showSendWhileRunning: boolean, hasSendableContent: boolean) {
+function renderRunningActions(
+  showSendWhileRunning: boolean,
+  hasSendableContent: boolean,
+  followUpBehavior: "queue" | "steer" | "interrupt" = "steer",
+) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
@@ -83,8 +89,9 @@ function renderRunningActions(showSendWhileRunning: boolean, hasSendableContent:
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent,
-      onQueueFollowUp: () => {},
-      queueFollowUpShortcutLabel: "⌘⇧↵",
+      followUpBehavior,
+      onFollowUpOverride: () => {},
+      followUpOverrideShortcutLabel: "⌘⇧↵",
       showSendWhileRunning,
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
@@ -107,8 +114,9 @@ function renderSendButton() {
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent: true,
-      onQueueFollowUp: () => {},
-      queueFollowUpShortcutLabel: "⌘⇧↵",
+      followUpBehavior: "steer",
+      onFollowUpOverride: () => {},
+      followUpOverrideShortcutLabel: "⌘⇧↵",
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -267,5 +275,23 @@ describe("ComposerPrimaryActions", () => {
 
     expect(markup).toContain('aria-label="Stop generation"');
     expect(markup).not.toContain('aria-label="Send message"');
+  });
+
+  it("offers the opposite of the configured follow-up behavior while running", () => {
+    const steering = renderRunningActions(false, true, "steer");
+    expect(steering).toContain('aria-label="Queue follow-up"');
+    expect(steering).not.toContain('aria-label="Steer the running turn"');
+
+    const interrupting = renderRunningActions(false, true, "interrupt");
+    expect(interrupting).toContain('aria-label="Queue follow-up"');
+
+    const queueing = renderRunningActions(false, true, "queue");
+    expect(queueing).toContain('aria-label="Steer the running turn"');
+    expect(queueing).not.toContain('aria-label="Queue follow-up"');
+  });
+
+  it("hides the override action when there is nothing to send", () => {
+    const markup = renderRunningActions(false, false, "steer");
+    expect(markup).not.toContain('aria-label="Queue follow-up"');
   });
 });

@@ -953,9 +953,11 @@ const ThreadSessionStopCommand = Schema.Struct({
  * form carries persisted attachments; the client form carries uploads, exactly
  * like `thread.turn.start` (see `ClientThreadFollowUpQueueCommand`).
  *
- * Queue position is NOT a client input: the decider appends past the current
- * tail against the serialized read model, so firing several follow-ups faster
- * than the queue round-trips cannot land them all on the same key.
+ * Queue position is NOT a client key: the decider derives it against the
+ * serialized read model, so firing several follow-ups faster than the queue
+ * round-trips cannot land them all on the same key. `sendNext` asks for the
+ * front of the queue instead of the back — what "interrupt and send" means when
+ * other follow-ups are already waiting.
  */
 const ThreadFollowUpQueueCommand = Schema.Struct({
   type: Schema.Literal("thread.follow-up.queue"),
@@ -967,6 +969,7 @@ const ThreadFollowUpQueueCommand = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  sendNext: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -980,6 +983,7 @@ const ClientThreadFollowUpQueueCommand = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  sendNext: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 

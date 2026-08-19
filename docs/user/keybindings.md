@@ -41,8 +41,9 @@ Commands are IDs like `terminal.toggle`, `commandPalette.toggle`, `preview.refre
 `projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
 Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
 
-`composer.queueFollowUp` queues the composer draft as a follow-up for when the agent goes idle,
-instead of sending it into the running turn, and defaults to `mod+shift+enter`. See
+`composer.followUpOverride` submits the composer draft with the opposite of **Settings** →
+**General** → **Follow-up behavior** for one message — queueing when your default sends
+immediately, steering when your default is Queue — and defaults to `mod+shift+enter`. See
 [Message composer](./composer.md).
 
 `themeEditor.toggle` opens or closes the floating theme editor and defaults to

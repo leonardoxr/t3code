@@ -1255,19 +1255,32 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `thread ${command.threadId} already has ${MAX_QUEUED_FOLLOW_UPS_PER_THREAD} queued follow-ups`,
         });
       }
-      // Append past the current tail. Decided here, against the serialized read
-      // model, so a burst of follow-ups cannot collide on one key the way a
-      // client computing keys from its own (possibly stale) copy would.
-      const tailOrderKey = (thread.queuedFollowUps ?? []).reduce<string | null>(
-        (tail, followUp) =>
-          tail === null || followUp.orderKey.localeCompare(tail) > 0 ? followUp.orderKey : tail,
-        null,
-      );
-      const orderKey = orderKeyBetween(tailOrderKey, null);
+      // Position is decided here, against the serialized read model, so a burst
+      // of follow-ups cannot collide on one key the way a client computing keys
+      // from its own (possibly stale) copy would. `sendNext` goes to the front:
+      // "interrupt and send" has to mean this message runs next, even when other
+      // follow-ups are already waiting.
+      const existingOrderKeys = (thread.queuedFollowUps ?? []).map((followUp) => followUp.orderKey);
+      const neighborOrderKey =
+        existingOrderKeys.length === 0
+          ? null
+          : existingOrderKeys.reduce((neighbor, orderKey) =>
+              command.sendNext === true
+                ? orderKey.localeCompare(neighbor) < 0
+                  ? orderKey
+                  : neighbor
+                : orderKey.localeCompare(neighbor) > 0
+                  ? orderKey
+                  : neighbor,
+            );
+      const orderKey =
+        command.sendNext === true
+          ? orderKeyBetween(null, neighborOrderKey)
+          : orderKeyBetween(neighborOrderKey, null);
       if (orderKey === null) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `thread ${command.threadId} has a corrupt queued follow-up order key '${tailOrderKey ?? ""}'`,
+          detail: `thread ${command.threadId} has a corrupt queued follow-up order key '${neighborOrderKey ?? ""}'`,
         });
       }
       return {

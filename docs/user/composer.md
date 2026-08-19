@@ -6,13 +6,24 @@ multiple messages, then send again in the same thread.
 
 ## Sending while the agent is working
 
-`Enter` still sends immediately and steers the running turn: the agent folds the message into the
-work it is already doing, in the same turn.
+**Settings** → **General** → **Follow-up behavior** decides what `Enter` does when a run is already
+active:
 
-`Cmd+Shift+Enter` (macOS) or `Ctrl+Shift+Enter` (Windows and Linux) queues the message instead. A
-queued follow-up waits until the thread is genuinely idle — no turn running, no error, nothing
-waiting on you — and is then sent on its own. The **Queue** button next to Stop does the same thing,
-and the shortcut is rebindable under **Settings** → **Keybindings** as `composer.queueFollowUp`.
+- **Queue** — park the message and send it once the thread is genuinely idle.
+- **Steer** (default) — send it into the running turn; the agent folds it into the work it is
+  already doing, without starting a new turn.
+- **Interrupt** — stop the run and send the message next.
+
+`Cmd+Shift+Enter` (macOS) or `Ctrl+Shift+Enter` (Windows and Linux) does the **opposite** for one
+message, without changing the setting: it queues when your default sends immediately, and steers
+when your default is Queue. The button beside Stop performs the same one-off action and always shows
+which one it is, so the mode is visible without opening Settings. The shortcut is rebindable under
+**Settings** → **Keybindings** as `composer.followUpOverride`.
+
+## The follow-up queue
+
+A queued follow-up waits until the thread is genuinely idle — no turn running, no error, nothing
+waiting on you — and is then sent on its own.
 
 Queued follow-ups appear above the composer with a count. Each one can be edited in place, removed,
 dragged to reorder, or sent right away with the arrow button (which steers the running turn if one

@@ -5401,7 +5401,10 @@ function ChatViewContent(props: ChatViewProps) {
    * skips is everything about dispatching now (optimistic message, timeline
    * anchoring, worktree bootstrap, title seeding).
    */
-  const onQueueFollowUp = async (event?: { preventDefault: () => void }) => {
+  const onQueueFollowUp = async (
+    event?: { preventDefault: () => void },
+    options?: { readonly sendNext?: boolean },
+  ) => {
     event?.preventDefault();
     if (!activeThread || !isServerThread || threadDetailLoading) return;
     if (activeEnvironmentUnavailable) {
@@ -5499,6 +5502,7 @@ function ChatViewContent(props: ChatViewProps) {
         ...(sendCtx.selectedModel ? { modelSelection: sendCtx.selectedModelSelection } : {}),
         runtimeMode,
         interactionMode,
+        ...(options?.sendNext === true ? { sendNext: true as const } : {}),
       },
     });
     if (result._tag === "Failure") {
