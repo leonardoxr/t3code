@@ -4,13 +4,14 @@ import {
   GitPullRequestIcon,
   SettingsIcon,
 } from "lucide-react";
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo, useRef } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import {
   SUBSCRIPTION_USAGE_PROVIDER_ORDER,
   pickBindingWindow,
 } from "@t3tools/shared/subscriptionUsageView";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
@@ -36,6 +37,13 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { SubscriptionUsageMeter } from "./SubscriptionUsageMeter";
+
+/**
+ * Matches the minute an environment caches each provider's probe for. A hover
+ * inside that window would be answered from the same cache entry, so asking is
+ * pointless rather than merely cheap.
+ */
+const QUOTA_PEEK_THROTTLE_MS = 60_000;
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -140,7 +148,23 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
-  const { providers: quotaProviders } = useSubscriptionUsage();
+  const { providers: quotaProviders, refresh: refreshQuota } = useSubscriptionUsage();
+  // Quota only ever moves while somebody is working, and the rings are mounted for
+  // the whole session, so the mount's single read would otherwise be the only one:
+  // a window left open showed the figures it had at load forever. The shared key
+  // keeps the two sidebar variants from each owning a schedule.
+  useLiveRefresh(refreshQuota, { key: "subscription-usage" });
+  // Hovering a ring is the moment its figures matter, so reading the card asks for
+  // a re-read. Throttled to the window the environment caches a probe for: asking
+  // again sooner cannot return a different number, it just re-sends the question.
+  // One timestamp for both rings, because one read answers for both providers.
+  const lastPeekAtRef = useRef(0);
+  const peekQuota = useCallback(() => {
+    const now = Date.now();
+    if (now - lastPeekAtRef.current < QUOTA_PEEK_THROTTLE_MS) return;
+    lastPeekAtRef.current = now;
+    refreshQuota();
+  }, [refreshQuota]);
   // The rings replace the usage icon only once they have a figure to show, so a
   // machine with nothing signed in still has a way to reach the page. A reported
   // provider whose every bucket was unprovisioned has no binding window, and an
@@ -247,6 +271,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
                   key={reported.provider}
                   provider={reported}
                   onClick={handleUsageClick}
+                  onPeek={peekQuota}
                 />
               ))
             )}

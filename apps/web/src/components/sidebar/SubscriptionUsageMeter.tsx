@@ -32,9 +32,16 @@ function formatUsedPercent(usedPercent: number): string {
 export function SubscriptionUsageMeter({
   provider,
   onClick,
+  onPeek,
 }: {
   readonly provider: SubscriptionUsageProvider;
   readonly onClick: () => void;
+  /**
+   * Called when the detail card is about to be read. Looking at the figures is
+   * the moment they most need to be current, so this asks for a re-read; the
+   * caller decides how often that is allowed to reach a provider.
+   */
+  readonly onPeek: () => void;
 }) {
   const { label, color, mark: Mark } = PROVIDER_PRESENTATION[provider.provider];
   const bindingWindow = pickBindingWindow(provider.windows);
@@ -47,7 +54,11 @@ export function SubscriptionUsageMeter({
 
   return (
     <SidebarMenuItem className="shrink-0">
-      <Popover>
+      <Popover
+        onOpenChange={(open) => {
+          if (open) onPeek();
+        }}
+      >
         <PopoverTrigger
           openOnHover
           delay={150}
