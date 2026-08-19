@@ -29,5 +29,6 @@ export * from "./review.ts";
 export * from "./preview.ts";
 export * from "./previewAutomation.ts";
 export * from "./resourceTelemetry.ts";
+export * from "./subscriptionUsage.ts";
 export * from "./usage.ts";
 export * from "./rpc.ts";

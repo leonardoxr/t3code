@@ -223,6 +223,10 @@
       "types": "./src/devProxy.ts",
       "import": "./src/devProxy.ts"
     },
+    "./subscriptionUsageView": {
+      "types": "./src/subscriptionUsageView.ts",
+      "import": "./src/subscriptionUsageView.ts"
+    },
     "./usageMerge": {
       "types": "./src/usageMerge.ts",
       "import": "./src/usageMerge.ts"
