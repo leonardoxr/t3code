@@ -40,6 +40,10 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+alt+shift+t", command: "themeEditor.toggle" },
   { key: "mod+s", command: "composer.stash", when: "!terminalFocus" },
   { key: "mod+enter", command: "composer.sendNow", when: "!terminalFocus" },
+  // A second binding for the same command: alt+enter is otherwise just another
+  // Enter in the composer, and "send this now" is worth a chord that does not
+  // move the hand off the home row.
+  { key: "alt+enter", command: "composer.sendNow", when: "!terminalFocus" },
   { key: "mod+shift+enter", command: "composer.queueFollowUp", when: "!terminalFocus" },
   { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+o", command: "chat.new", when: "!terminalFocus" },

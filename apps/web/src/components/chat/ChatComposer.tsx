@@ -429,6 +429,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   preserveComposerFocusOnPointerDown?: boolean;
   showSendWhileRunning?: boolean;
   followUpBehavior: FollowUpBehavior;
+  sendNowStopsRun: boolean;
   onFollowUpAlternate: () => void;
   followUpAlternateShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
@@ -461,6 +462,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         showSendWhileRunning={props.showSendWhileRunning ?? false}
         followUpBehavior={props.followUpBehavior}
+        sendNowStopsRun={props.sendNowStopsRun}
         onFollowUpAlternate={props.onFollowUpAlternate}
         followUpAlternateShortcutLabel={props.followUpAlternateShortcutLabel}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
@@ -928,12 +930,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const planModeUiEnabled = settings.planModeEnabled;
   const configuredFollowUpBehavior = settings.followUpBehavior;
   const midTurnSteering = getProviderMidTurnSteering(providerStatuses, selectedProvider);
-  // A provider that cannot steer turns "steer" into "queue" so every
-  // affordance (button label, chord hint, queue cards) tells the truth about
-  // where the message goes; the resolver enforces the same rule for the
-  // explicit send-now chord.
+  // A provider that cannot steer turns Enter's "steer" into "queue": nobody
+  // asked to destroy the running turn by pressing Enter. Sending now stays
+  // reachable and immediate — the server stops the run and answers the
+  // message next — and every affordance says so.
+  const sendNowStopsRun = midTurnSteering === "queued";
   const followUpBehavior =
-    configuredFollowUpBehavior === "steer" && midTurnSteering === "queued"
+    configuredFollowUpBehavior === "steer" && sendNowStopsRun
       ? "queue"
       : configuredFollowUpBehavior;
   const composerProviderControls = useMemo(
@@ -2968,6 +2971,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       preserveComposerFocusOnPointerDown
                       onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                       followUpBehavior={followUpBehavior}
+                      sendNowStopsRun={sendNowStopsRun}
                       followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
@@ -3073,6 +3077,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               <ComposerQueuedFollowUps
                 followUps={queuedFollowUps}
                 isRunning={phase === "running"}
+                sendNowStopsRun={sendNowStopsRun}
                 onEdit={onEditQueuedFollowUp}
                 onRemove={onRemoveQueuedFollowUp}
                 onReorder={onReorderQueuedFollowUp}
@@ -3266,6 +3271,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     preserveComposerFocusOnPointerDown
                     onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                     followUpBehavior={followUpBehavior}
+                    sendNowStopsRun={sendNowStopsRun}
                     followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
@@ -3398,6 +3404,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   showSendWhileRunning={isMobileViewport}
                   onFollowUpAlternate={handleFollowUpAlternatePrimaryAction}
                   followUpBehavior={followUpBehavior}
+                  sendNowStopsRun={sendNowStopsRun}
                   followUpAlternateShortcutLabel={followUpAlternateShortcutLabel}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
