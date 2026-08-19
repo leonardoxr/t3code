@@ -11,6 +11,7 @@ import {
   SUBSCRIPTION_USAGE_PROVIDER_ORDER,
   pickBindingWindow,
 } from "@t3tools/shared/subscriptionUsageView";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
@@ -140,7 +141,12 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
-  const { providers: quotaProviders } = useSubscriptionUsage();
+  const { providers: quotaProviders, refresh: refreshQuota } = useSubscriptionUsage();
+  // Quota only ever moves while somebody is working, and the rings are mounted for
+  // the whole session, so the mount's single read would otherwise be the only one:
+  // a window left open showed the figures it had at load forever. The shared key
+  // keeps the two sidebar variants from each owning a schedule.
+  useLiveRefresh(refreshQuota, { key: "subscription-usage" });
   // The rings replace the usage icon only once they have a figure to show, so a
   // machine with nothing signed in still has a way to reach the page. A reported
   // provider whose every bucket was unprovisioned has no binding window, and an
