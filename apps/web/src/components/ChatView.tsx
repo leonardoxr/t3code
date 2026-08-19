@@ -3,7 +3,10 @@ import {
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
+  MAX_QUEUED_FOLLOW_UPS_PER_THREAD,
   type MessageId,
+  type OrchestrationQueuedFollowUp,
+  type QueuedFollowUpId,
   type ModelSelection,
   type ProjectScript,
   type ProjectId,
@@ -179,7 +182,7 @@ import {
   nextProjectScriptId,
   projectScriptIdFromCommand,
 } from "~/projectScripts";
-import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { newDraftId, newMessageId, newQueuedFollowUpId, newThreadId } from "~/lib/utils";
 import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
@@ -358,6 +361,7 @@ const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+const EMPTY_QUEUED_FOLLOW_UPS: ReadonlyArray<OrchestrationQueuedFollowUp> = [];
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1230,6 +1234,23 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const queueThreadFollowUp = useAtomCommand(threadEnvironment.queueFollowUp, {
+    reportFailure: false,
+  });
+  // Queue mutations race the dispatcher taking the head; a lost race is normal,
+  // so these stay quiet instead of toasting.
+  const editThreadFollowUp = useAtomCommand(threadEnvironment.editFollowUp, {
+    reportFailure: false,
+  });
+  const removeThreadFollowUp = useAtomCommand(threadEnvironment.removeFollowUp, {
+    reportFailure: false,
+  });
+  const reorderThreadFollowUp = useAtomCommand(threadEnvironment.reorderFollowUp, {
+    reportFailure: false,
+  });
+  const promoteThreadFollowUp = useAtomCommand(threadEnvironment.promoteFollowUp, {
+    reportFailure: false,
+  });
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
@@ -5373,6 +5394,198 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
+  /**
+   * Parks the composer's draft as a queued follow-up instead of steering the
+   * running turn with it. Shares the send path's context flattening so a queued
+   * follow-up carries exactly what a normal send would have carried; what it
+   * skips is everything about dispatching now (optimistic message, timeline
+   * anchoring, worktree bootstrap, title seeding).
+   */
+  const onQueueFollowUp = async (
+    event?: { preventDefault: () => void },
+    options?: { readonly sendNext?: boolean },
+  ) => {
+    event?.preventDefault();
+    if (!activeThread || !isServerThread || threadDetailLoading) return;
+    if (activeEnvironmentUnavailable) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Not connected: follow-up not queued",
+          description: "Reconnecting to the environment. Try again once it is connected.",
+        }),
+      );
+      return;
+    }
+    const sendCtx = composerRef.current?.getSendContext();
+    if (!sendCtx?.providerAvailable) return;
+    const queuedFollowUps = activeThread.queuedFollowUps ?? [];
+    if (queuedFollowUps.length >= MAX_QUEUED_FOLLOW_UPS_PER_THREAD) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Follow-up queue is full",
+          description: `Send or remove a queued follow-up first (limit ${MAX_QUEUED_FOLLOW_UPS_PER_THREAD}).`,
+        }),
+      );
+      return;
+    }
+    const promptForQueue = promptRef.current;
+    const { sendableTerminalContexts, expiredTerminalContextCount, hasSendableContent } =
+      deriveComposerSendState({
+        prompt: promptForQueue,
+        imageCount: sendCtx.images.length,
+        terminalContexts: sendCtx.terminalContexts,
+        elementContextCount:
+          sendCtx.elementContexts.length +
+          sendCtx.previewAnnotations.length +
+          sendCtx.reviewComments.length,
+      });
+    if (!hasSendableContent) {
+      if (expiredTerminalContextCount > 0) {
+        const toastCopy = buildExpiredTerminalContextToastCopy(
+          expiredTerminalContextCount,
+          "empty",
+        );
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: toastCopy.title,
+            description: toastCopy.description,
+          }),
+        );
+      }
+      return;
+    }
+    const messageTextForQueue = appendReviewCommentsToPrompt(
+      sendCtx.previewAnnotations.reduce(
+        (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+        appendElementContextsToPrompt(
+          appendTerminalContextsToPrompt(promptForQueue, sendableTerminalContexts),
+          sendCtx.elementContexts,
+        ),
+      ),
+      sendCtx.reviewComments,
+    );
+    const outgoingFollowUpText = formatOutgoingPrompt({
+      provider: sendCtx.selectedProvider,
+      model: sendCtx.selectedModel,
+      models: sendCtx.selectedProviderModels,
+      effort: sendCtx.selectedPromptEffort,
+      text: messageTextForQueue || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+    });
+    if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) return;
+    const attachmentsResult = await settlePromise(() =>
+      Promise.all(
+        sendCtx.images.map(async (image) => ({
+          type: "image" as const,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+        })),
+      ),
+    );
+    if (attachmentsResult._tag === "Failure") {
+      setThreadError(activeThread.id, "Failed to read an image attachment.");
+      return;
+    }
+    // Queue position is the server's call: it appends against the authoritative
+    // queue, so firing several follow-ups in a row cannot collide.
+    const result = await queueThreadFollowUp({
+      environmentId,
+      input: {
+        threadId: activeThread.id,
+        followUpId: newQueuedFollowUpId(),
+        text: outgoingFollowUpText,
+        attachments: attachmentsResult.value,
+        ...(sendCtx.selectedModel ? { modelSelection: sendCtx.selectedModelSelection } : {}),
+        runtimeMode,
+        interactionMode,
+        ...(options?.sendNext === true ? { sendNext: true as const } : {}),
+      },
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to queue the follow-up.",
+        );
+      }
+      return;
+    }
+    // Only clear once the queue owns the draft — a rejected queue keeps the
+    // composer exactly as the user left it.
+    promptRef.current = "";
+    clearComposerDraftContent(composerDraftTarget);
+    composerRef.current?.resetCursorState();
+    if (expiredTerminalContextCount > 0) {
+      const toastCopy = buildExpiredTerminalContextToastCopy(
+        expiredTerminalContextCount,
+        "omitted",
+      );
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: toastCopy.title,
+          description: toastCopy.description,
+        }),
+      );
+    }
+  };
+
+  const onEditQueuedFollowUp = useCallback(
+    async (followUpId: QueuedFollowUpId, text: string) => {
+      if (!activeThreadId) return;
+      await editThreadFollowUp({
+        environmentId,
+        input: { threadId: activeThreadId, followUpId, text },
+      });
+    },
+    [activeThreadId, editThreadFollowUp, environmentId],
+  );
+
+  const onRemoveQueuedFollowUp = useCallback(
+    async (followUpId: QueuedFollowUpId) => {
+      if (!activeThreadId) return;
+      await removeThreadFollowUp({
+        environmentId,
+        input: { threadId: activeThreadId, followUpId },
+      });
+    },
+    [activeThreadId, environmentId, removeThreadFollowUp],
+  );
+
+  const onReorderQueuedFollowUp = useCallback(
+    async (followUpId: QueuedFollowUpId, orderKey: string) => {
+      if (!activeThreadId) return;
+      await reorderThreadFollowUp({
+        environmentId,
+        input: { threadId: activeThreadId, followUpId, orderKey },
+      });
+    },
+    [activeThreadId, environmentId, reorderThreadFollowUp],
+  );
+
+  const onPromoteQueuedFollowUp = useCallback(
+    async (followUpId: QueuedFollowUpId) => {
+      if (!activeThreadId) return;
+      const result = await promoteThreadFollowUp({
+        environmentId,
+        input: { threadId: activeThreadId, followUpId },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadId,
+          error instanceof Error ? error.message : "Failed to send the queued follow-up.",
+        );
+      }
+    },
+    [activeThreadId, environmentId, promoteThreadFollowUp, setThreadError],
+  );
+
   const onInterrupt = async () => {
     if (!activeThread) return;
     const result = await interruptThreadTurn({
@@ -6466,6 +6679,14 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
+                            onQueueFollowUp={onQueueFollowUp}
+                            queuedFollowUps={
+                              activeThread?.queuedFollowUps ?? EMPTY_QUEUED_FOLLOW_UPS
+                            }
+                            onEditQueuedFollowUp={onEditQueuedFollowUp}
+                            onRemoveQueuedFollowUp={onRemoveQueuedFollowUp}
+                            onReorderQueuedFollowUp={onReorderQueuedFollowUp}
+                            onPromoteQueuedFollowUp={onPromoteQueuedFollowUp}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}

@@ -2,8 +2,10 @@ import type {
   OrchestrationCommand,
   OrchestrationProject,
   OrchestrationReadModel,
+  OrchestrationQueuedFollowUp,
   OrchestrationThread,
   ProjectId,
+  QueuedFollowUpId,
   ThreadId,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
@@ -163,6 +165,30 @@ export function requireThreadAbsent(input: {
     invariantError(
       input.command.type,
       `Thread '${input.threadId}' already exists and cannot be created twice.`,
+    ),
+  );
+}
+
+/**
+ * A queued follow-up the command names must still be queued. The common miss is
+ * benign — the dispatcher took the head between the client reading the queue
+ * and the click landing — so callers surface these rejections quietly.
+ */
+export function requireQueuedFollowUp(input: {
+  readonly thread: OrchestrationThread;
+  readonly command: OrchestrationCommand;
+  readonly followUpId: QueuedFollowUpId;
+}): Effect.Effect<OrchestrationQueuedFollowUp, OrchestrationCommandInvariantError> {
+  const followUp = (input.thread.queuedFollowUps ?? []).find(
+    (entry) => entry.id === input.followUpId,
+  );
+  if (followUp) {
+    return Effect.succeed(followUp);
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Queued follow-up '${input.followUpId}' does not exist on thread '${input.thread.id}'.`,
     ),
   );
 }

@@ -18,6 +18,7 @@ import {
   type OrchestrationMessage,
   type OrchestrationProjectShell,
   type OrchestrationProposedPlan,
+  type OrchestrationQueuedFollowUp,
   type OrchestrationProject,
   type OrchestrationSession,
   type OrchestrationThreadActivity,
@@ -50,6 +51,7 @@ import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadQueuedFollowUp } from "../../persistence/Services/ProjectionThreadQueuedFollowUps.ts";
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import {
@@ -86,6 +88,12 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   }),
 );
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
+const ProjectionThreadQueuedFollowUpDbRowSchema = ProjectionThreadQueuedFollowUp.mapFields(
+  Struct.assign({
+    attachments: Schema.fromJsonString(Schema.Array(ChatAttachment)),
+    modelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+  }),
+);
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
@@ -200,6 +208,7 @@ const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
   ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
   ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
+  ORCHESTRATION_PROJECTOR_NAMES.threadQueuedFollowUps,
 ] as const;
 
 function maxIso(left: string | null, right: string): string {
@@ -337,6 +346,24 @@ function mapProposedPlanRow(
     planMarkdown: row.planMarkdown,
     implementedAt: row.implementedAt,
     implementationThreadId: row.implementationThreadId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapQueuedFollowUpRow(
+  row: Schema.Schema.Type<typeof ProjectionThreadQueuedFollowUpDbRowSchema>,
+): OrchestrationQueuedFollowUp {
+  return {
+    id: row.followUpId,
+    text: row.text,
+    attachments: row.attachments,
+    ...(row.modelSelection !== null ? { modelSelection: row.modelSelection } : {}),
+    runtimeMode: row.runtimeMode,
+    interactionMode: row.interactionMode,
+    orderKey: row.orderKey,
+    status: row.status,
+    lastError: row.lastError,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -556,6 +583,29 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           updated_at AS "updatedAt"
         FROM projection_thread_proposed_plans
         ORDER BY thread_id ASC, created_at ASC, plan_id ASC
+      `,
+  });
+
+  const listThreadQueuedFollowUpRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadQueuedFollowUpDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          follow_up_id AS "followUpId",
+          thread_id AS "threadId",
+          text,
+          attachments_json AS "attachments",
+          model_selection_json AS "modelSelection",
+          runtime_mode AS "runtimeMode",
+          interaction_mode AS "interactionMode",
+          order_key AS "orderKey",
+          status,
+          last_error AS "lastError",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_queued_follow_ups
+        ORDER BY thread_id ASC, order_key ASC, follow_up_id ASC
       `,
   });
 
@@ -1004,6 +1054,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const listThreadQueuedFollowUpRowsByThread = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadQueuedFollowUpDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          follow_up_id AS "followUpId",
+          thread_id AS "threadId",
+          text,
+          attachments_json AS "attachments",
+          model_selection_json AS "modelSelection",
+          runtime_mode AS "runtimeMode",
+          interaction_mode AS "interactionMode",
+          order_key AS "orderKey",
+          status,
+          last_error AS "lastError",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_queued_follow_ups
+        WHERE thread_id = ${threadId}
+        ORDER BY order_key ASC, follow_up_id ASC
+      `,
+  });
+
   const listThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
@@ -1150,7 +1224,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             'thread.activity-appended',
             'thread.turn-diff-completed',
             'thread.reverted',
-            'thread.session-set'
+            'thread.session-set',
+            'thread.follow-up-queued',
+            'thread.follow-up-edited',
+            'thread.follow-up-removed',
+            'thread.follow-up-reordered',
+            'thread.follow-up-paused',
+            'thread.follow-up-failed'
           )
       `,
   });
@@ -1517,6 +1597,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          listThreadQueuedFollowUpRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getSnapshot:listThreadQueuedFollowUps:query",
+                "ProjectionSnapshotQuery.getSnapshot:listThreadQueuedFollowUps:decodeRows",
+              ),
+            ),
+          ),
         ]),
       )
       .pipe(
@@ -1531,10 +1619,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             checkpointRows,
             latestTurnRows,
             stateRows,
+            queuedFollowUpRows,
           ]) =>
             Effect.gen(function* () {
               const messagesByThread = new Map<string, Array<OrchestrationMessage>>();
               const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
+              const queuedFollowUpsByThread = new Map<string, Array<OrchestrationQueuedFollowUp>>();
               const activitiesByThread = new Map<string, Array<OrchestrationThreadActivity>>();
               const checkpointsByThread = new Map<string, Array<OrchestrationCheckpointSummary>>();
               const sessionsByThread = new Map<string, OrchestrationSession>();
@@ -1581,6 +1671,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   updatedAt: row.updatedAt,
                 });
                 proposedPlansByThread.set(row.threadId, threadProposedPlans);
+              }
+
+              for (const row of queuedFollowUpRows) {
+                updatedAt = maxIso(updatedAt, row.updatedAt);
+                const threadQueuedFollowUps = queuedFollowUpsByThread.get(row.threadId) ?? [];
+                threadQueuedFollowUps.push(mapQueuedFollowUpRow(row));
+                queuedFollowUpsByThread.set(row.threadId, threadQueuedFollowUps);
               }
 
               for (const row of activityRows) {
@@ -1705,6 +1802,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                queuedFollowUps: queuedFollowUpsByThread.get(row.threadId) ?? [],
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -1763,6 +1861,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          listThreadQueuedFollowUpRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listThreadQueuedFollowUps:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listThreadQueuedFollowUps:decodeRows",
+              ),
+            ),
+          ),
           listThreadSessionRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1791,7 +1897,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       )
       .pipe(
         Effect.flatMap(
-          ([projectRows, threadRows, proposedPlanRows, sessionRows, latestTurnRows, stateRows]) =>
+          ([
+            projectRows,
+            threadRows,
+            proposedPlanRows,
+            queuedFollowUpRows,
+            sessionRows,
+            latestTurnRows,
+            stateRows,
+          ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
               const projects: OrchestrationProject[] = [];
@@ -1867,6 +1981,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 latestTurnByThread.set(row.threadId, mapLatestTurn(row));
               }
               const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
+              const queuedFollowUpsByThread = new Map<string, Array<OrchestrationQueuedFollowUp>>();
               const sessionByThread = new Map<string, OrchestrationSession>();
 
               for (let index = 0; index < sessionRows.length; index += 1) {
@@ -1885,6 +2000,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 const threadProposedPlans = proposedPlansByThread.get(row.threadId) ?? [];
                 threadProposedPlans.push(mapProposedPlanRow(row));
                 proposedPlansByThread.set(row.threadId, threadProposedPlans);
+              }
+
+              for (let index = 0; index < queuedFollowUpRows.length; index += 1) {
+                const row = queuedFollowUpRows[index];
+                if (!row) {
+                  continue;
+                }
+                updatedAt = maxIso(updatedAt, row.updatedAt);
+                const threadQueuedFollowUps = queuedFollowUpsByThread.get(row.threadId) ?? [];
+                threadQueuedFollowUps.push(mapQueuedFollowUpRow(row));
+                queuedFollowUpsByThread.set(row.threadId, threadQueuedFollowUps);
               }
 
               for (let index = 0; index < threadRows.length; index += 1) {
@@ -1912,6 +2038,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  queuedFollowUps: queuedFollowUpsByThread.get(row.threadId) ?? [],
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2500,6 +2627,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         threadRow,
         messageRows,
         proposedPlanRows,
+        queuedFollowUpRows,
         activityRows,
         pinnedActivityRows,
         checkpointRows,
@@ -2530,6 +2658,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadDetailById:listPlans:query",
               "ProjectionSnapshotQuery.getThreadDetailById:listPlans:decodeRows",
+            ),
+          ),
+        ),
+        listThreadQueuedFollowUpRowsByThread({ threadId }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadDetailById:listQueuedFollowUps:query",
+              "ProjectionSnapshotQuery.getThreadDetailById:listQueuedFollowUps:decodeRows",
             ),
           ),
         ),
@@ -2630,6 +2766,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           return message;
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),
+        queuedFollowUps: queuedFollowUpRows.map(mapQueuedFollowUpRow),
         activities: selectedActivityRows.map((row) => {
           const activity = {
             id: row.activityId,

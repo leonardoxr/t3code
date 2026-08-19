@@ -92,13 +92,15 @@ does not define turn end.
 
 Follow-up work runs asynchronously in queue-backed workers built on [`DrainableWorker`][worker]:
 [`ProviderRuntimeIngestion`][ingest] normalizes provider runtime streams into orchestration commands,
-[`ProviderCommandReactor`][cmd] dispatches provider calls in response to intent events, and
-[`CheckpointReactor`][checkpoint] captures and reverts workspace checkpoints.
+[`ProviderCommandReactor`][cmd] dispatches provider calls in response to intent events,
+[`CheckpointReactor`][checkpoint] captures and reverts workspace checkpoints, and
+[`FollowUpQueueReactor`][followup] sends the head of a thread's queued follow-ups once that thread is
+genuinely idle.
 
 `DrainableWorker` pairs a transactional queue with a transactional count of outstanding items.
 `enqueue` atomically offers and increments; processing always decrements. `drain` retries until the
 count reaches zero, so a test can await "queue empty and current item finished" instead of sleeping.
-Each of the three services exposes `drain` for exactly this.
+Each of these services exposes `drain` for exactly this.
 
 Runtime receipts are a test-only mechanism. `RuntimeReceiptBusLive` in
 [`RuntimeReceiptBus.ts`][receipts] publishes nothing; only the test layer is PubSub-backed. Do not
@@ -148,5 +150,6 @@ already dispatch.
 [ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
+[followup]: ../../apps/server/src/orchestration/Layers/FollowUpQueueReactor.ts
 [receipts]: ../../apps/server/src/orchestration/Layers/RuntimeReceiptBus.ts
 [drivers]: ../../apps/server/src/provider/builtInDrivers.ts

@@ -271,6 +271,13 @@ function projectSetupScriptCompatibilityDetail(
   }
 }
 
+/**
+ * Event types a thread subscription delivers. This is an allowlist: an event
+ * missing here still lands in the database and shows up on the next snapshot,
+ * but never reaches a live client — so anything the thread detail renders has
+ * to be listed. `getThreadEventWatermarkRow` in ProjectionSnapshotQuery.ts
+ * filters on the same set and must be kept in step.
+ */
 export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   OrchestrationEvent,
   {
@@ -280,7 +287,13 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
       | "thread.activity-appended"
       | "thread.turn-diff-completed"
       | "thread.reverted"
-      | "thread.session-set";
+      | "thread.session-set"
+      | "thread.follow-up-queued"
+      | "thread.follow-up-edited"
+      | "thread.follow-up-removed"
+      | "thread.follow-up-reordered"
+      | "thread.follow-up-paused"
+      | "thread.follow-up-failed";
   }
 > {
   return (
@@ -289,7 +302,13 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||
     event.type === "thread.reverted" ||
-    event.type === "thread.session-set"
+    event.type === "thread.session-set" ||
+    event.type === "thread.follow-up-queued" ||
+    event.type === "thread.follow-up-edited" ||
+    event.type === "thread.follow-up-removed" ||
+    event.type === "thread.follow-up-reordered" ||
+    event.type === "thread.follow-up-paused" ||
+    event.type === "thread.follow-up-failed"
   );
 }
 

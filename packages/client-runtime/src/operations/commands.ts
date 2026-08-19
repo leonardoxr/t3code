@@ -51,6 +51,11 @@ export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+export type QueueThreadFollowUpInput = CommandInput<"thread.follow-up.queue">;
+export type EditThreadFollowUpInput = CommandInput<"thread.follow-up.edit">;
+export type RemoveThreadFollowUpInput = CommandInput<"thread.follow-up.remove">;
+export type ReorderThreadFollowUpInput = CommandInput<"thread.follow-up.reorder">;
+export type PromoteThreadFollowUpInput = CommandInput<"thread.follow-up.promote">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
 type CommandEffect = Effect.Effect<
@@ -331,3 +336,63 @@ export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect
     createdAt: metadata.createdAt,
   });
 });
+
+export const queueThreadFollowUp: (input: QueueThreadFollowUpInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.queueThreadFollowUp",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.follow-up.queue",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const editThreadFollowUp: (input: EditThreadFollowUpInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.editThreadFollowUp",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.follow-up.edit",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const removeThreadFollowUp: (input: RemoveThreadFollowUpInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.removeThreadFollowUp",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.follow-up.remove",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const reorderThreadFollowUp: (input: ReorderThreadFollowUpInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.reorderThreadFollowUp")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "thread.follow-up.reorder",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+/** Sends a queued follow-up now: steers a running turn, or resumes a paused
+ *  queue, or retries a failed head — the server decides which by thread state. */
+export const promoteThreadFollowUp: (input: PromoteThreadFollowUpInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.promoteThreadFollowUp")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "thread.follow-up.promote",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });

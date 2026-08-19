@@ -1,11 +1,13 @@
+import type { FollowUpBehavior } from "@t3tools/contracts/settings";
 import { memo, type PointerEventHandler } from "react";
-import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronLeftIcon, ListPlusIcon, NavigationIcon } from "lucide-react";
 import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 interface PendingActionState {
   questionIndex: number;
@@ -31,6 +33,12 @@ interface ComposerPrimaryActionsProps {
   /** Enter-to-send is disabled on mobile viewports, where stop would otherwise
    * be the only primary action and a running turn could not be steered. */
   showSendWhileRunning?: boolean;
+  /** Settings → Follow-up behavior: what Enter does while a turn is running. */
+  followUpBehavior: FollowUpBehavior;
+  /** Submits with the opposite behavior for one message. */
+  onFollowUpOverride: () => void;
+  /** Rendered in the tooltip so the override chord is discoverable. */
+  followUpOverrideShortcutLabel: string | null;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -72,6 +80,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   hasSendableContent,
   preserveComposerFocusOnPointerDown = false,
   showSendWhileRunning = false,
+  followUpBehavior,
+  onFollowUpOverride,
+  followUpOverrideShortcutLabel,
   onPreviousPendingQuestion,
   onInterrupt,
   onImplementPlanInNewThread,
@@ -274,8 +285,54 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return sendButton;
   }
 
+  // While a turn runs, Enter does whatever Settings → Follow-up behavior says.
+  // This button is the other half of that choice — always the opposite action —
+  // so the mode is visible in the composer and a pointer-only user can reach
+  // both. Its tooltip names the chord that does the same thing.
+  const overrideAction =
+    followUpBehavior === "queue"
+      ? {
+          label: "Steer the running turn",
+          icon: <NavigationIcon className="size-4 rotate-90" aria-hidden="true" />,
+          tooltip: "Steer the running turn with this message",
+          enterDoes: "Enter queues it for when the agent goes idle.",
+        }
+      : {
+          label: "Queue follow-up",
+          icon: <ListPlusIcon className="size-4" aria-hidden="true" />,
+          tooltip: "Queue for when the agent goes idle",
+          enterDoes:
+            followUpBehavior === "interrupt"
+              ? "Enter stops the run and sends it next."
+              : "Enter steers the running turn.",
+        };
+  const overrideButton = (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-border/80 bg-background text-secondary-label shadow-xs transition-all duration-150 hover:scale-105 hover:text-foreground disabled:pointer-events-none disabled:opacity-30 sm:size-8"
+            {...pointerFocusProps}
+            disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
+            aria-label={overrideAction.label}
+            onClick={onFollowUpOverride}
+          >
+            {overrideAction.icon}
+          </button>
+        }
+      />
+      <TooltipPopup side="top" className="max-w-64 text-center leading-tight">
+        {overrideAction.tooltip}
+        {followUpOverrideShortcutLabel ? ` (${followUpOverrideShortcutLabel})` : ""}.{" "}
+        {overrideAction.enterDoes}
+      </TooltipPopup>
+    </Tooltip>
+  );
+
   return (
     <>
+      {hasSendableContent ? overrideButton : null}
       {renderStopGenerationButton(false)}
       {showSendWhileRunning && hasSendableContent ? sendButton : null}
     </>

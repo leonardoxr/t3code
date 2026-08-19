@@ -1,170 +1,56 @@
-import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import type { FollowUpBehavior } from "@t3tools/contracts/settings";
+import { describe, expect, it } from "vite-plus/test";
 
-import { submitComposerDraft } from "./composerSubmission";
+import { resolveFollowUpDelivery } from "./composerSubmission";
 
-describe("submitComposerDraft", () => {
-  it("keeps an oversized draft editable and sends a corrected follow-up", () => {
-    let draft = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1);
-    let validationMessage: string | null = null;
-    const dispatchedDrafts: string[] = [];
-    const preventDefault = vi.fn();
+const BEHAVIORS: ReadonlyArray<FollowUpBehavior> = ["queue", "steer", "interrupt"];
 
-    const submit = () => {
-      const result = submitComposerDraft({
-        prompt: draft,
-        submissionTarget: "provider-turn",
-        event: { preventDefault },
-        onSend: () => {
-          dispatchedDrafts.push(draft);
-        },
-      });
-      validationMessage = result.validationMessage;
-    };
+describe("resolveFollowUpDelivery", () => {
+  it("just sends when no turn is running, whatever the setting says", () => {
+    for (const behavior of BEHAVIORS) {
+      expect(
+        resolveFollowUpDelivery({ behavior, isRunning: false, override: false }),
+        behavior,
+      ).toBe("send");
+      expect(
+        resolveFollowUpDelivery({ behavior, isRunning: false, override: true }),
+        behavior,
+      ).toBe("send");
+    }
+  });
 
-    submit();
-
-    expect(dispatchedDrafts).toEqual([]);
-    expect(draft).toHaveLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1);
-    expect(validationMessage).toBe(
-      "Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending.",
+  it("applies the configured behavior while a turn is running", () => {
+    expect(resolveFollowUpDelivery({ behavior: "steer", isRunning: true, override: false })).toBe(
+      "send",
     );
-    expect(preventDefault).toHaveBeenCalledOnce();
-
-    draft = "Corrected prompt";
-    submit();
-
-    expect(dispatchedDrafts).toEqual(["Corrected prompt"]);
-    expect(validationMessage).toBeNull();
+    expect(resolveFollowUpDelivery({ behavior: "queue", isRunning: true, override: false })).toBe(
+      "queue",
+    );
+    expect(
+      resolveFollowUpDelivery({ behavior: "interrupt", isRunning: true, override: false }),
+    ).toBe("interrupt");
   });
 
-  it("allows a draft at the shared character limit through the normal send path", () => {
-    const draft = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
-    const onSend = vi.fn();
-    const preventDefault = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: draft,
-      submissionTarget: "provider-turn",
-      event: { preventDefault },
-      onSend,
-    });
-
-    expect(result).toEqual({ validationMessage: null, didDispatch: true });
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(preventDefault).not.toHaveBeenCalled();
+  it("flips between queueing and sending now for one message", () => {
+    // Sending immediately by default → the override queues.
+    expect(resolveFollowUpDelivery({ behavior: "steer", isRunning: true, override: true })).toBe(
+      "queue",
+    );
+    expect(
+      resolveFollowUpDelivery({ behavior: "interrupt", isRunning: true, override: true }),
+    ).toBe("queue");
+    // Queueing by default → the override sends now, and "now" steers rather
+    // than interrupts: of the two immediates it destroys no work.
+    expect(resolveFollowUpDelivery({ behavior: "queue", isRunning: true, override: true })).toBe(
+      "send",
+    );
   });
 
-  it("blocks when appended context pushes the provider input over the shared limit", () => {
-    const draft = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
-    const onSend = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: draft,
-      providerInput: `${draft}\n\nTerminal context`,
-      submissionTarget: "provider-turn",
-      event: undefined,
-      onSend,
-    });
-
-    expect(result).toEqual({
-      validationMessage:
-        "Prompt is 18 characters over the 120,000-character limit. Shorten or split it before sending.",
-      didDispatch: false,
-    });
-    expect(draft).toHaveLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
-    expect(onSend).not.toHaveBeenCalled();
-
-    const correctedResult = submitComposerDraft({
-      prompt: "Corrected prompt",
-      providerInput: "Corrected prompt\n\nShort terminal context",
-      submissionTarget: "provider-turn",
-      event: undefined,
-      onSend,
-    });
-
-    expect(correctedResult).toEqual({ validationMessage: null, didDispatch: true });
-    expect(onSend).toHaveBeenCalledOnce();
-  });
-
-  it("does not finish submission when the send boundary rejects composed provider input", () => {
-    const preventDefault = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: "Sendable raw draft",
-      submissionTarget: "provider-turn",
-      event: { preventDefault },
-      onSend: () => false,
-    });
-
-    expect(result).toEqual({ validationMessage: null, didDispatch: false });
-    expect(preventDefault).toHaveBeenCalledOnce();
-  });
-
-  it("allows fully composed provider input at the shared character limit", () => {
-    const onSend = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: "Short draft",
-      providerInput: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
-      submissionTarget: "provider-turn",
-      event: undefined,
-      onSend,
-    });
-
-    expect(result).toEqual({ validationMessage: null, didDispatch: true });
-    expect(onSend).toHaveBeenCalledOnce();
-  });
-
-  it("blocks a generated plan follow-up that exceeds the shared limit", () => {
-    const onSend = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: "",
-      providerInput: `PLEASE IMPLEMENT THIS PLAN:\n${"x".repeat(
-        PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-      )}`,
-      submissionTarget: "provider-turn",
-      event: undefined,
-      onSend,
-    });
-
-    expect(result.didDispatch).toBe(false);
-    expect(result.validationMessage).toContain("over the 120,000-character limit");
-    expect(onSend).not.toHaveBeenCalled();
-  });
-
-  it("allows surrounding whitespace that the provider turn contract trims", () => {
-    const draft = ` ${"x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)} `;
-    const onSend = vi.fn();
-    const preventDefault = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: draft,
-      submissionTarget: "provider-turn",
-      event: { preventDefault },
-      onSend,
-    });
-
-    expect(result).toEqual({ validationMessage: null, didDispatch: true });
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(preventDefault).not.toHaveBeenCalled();
-  });
-
-  it("dispatches pending user input answers on their separate response path", () => {
-    const answer = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1);
-    const onSend = vi.fn();
-    const preventDefault = vi.fn();
-
-    const result = submitComposerDraft({
-      prompt: answer,
-      submissionTarget: "pending-user-input",
-      event: { preventDefault },
-      onSend,
-    });
-
-    expect(result).toEqual({ validationMessage: null, didDispatch: true });
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(preventDefault).not.toHaveBeenCalled();
+  it("never resolves the override to the same delivery as the default", () => {
+    for (const behavior of BEHAVIORS) {
+      const plain = resolveFollowUpDelivery({ behavior, isRunning: true, override: false });
+      const overridden = resolveFollowUpDelivery({ behavior, isRunning: true, override: true });
+      expect(overridden, behavior).not.toBe(plain);
+    }
   });
 });

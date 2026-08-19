@@ -76,7 +76,13 @@ import {
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
-import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../../state/server";
+import {
+  primaryServerKeybindingsAtom,
+  primaryServerObservabilityAtom,
+  primaryServerProvidersAtom,
+} from "../../state/server";
+import { shortcutLabelForCommand } from "../../keybindings";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -520,6 +526,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? ["Add project base directory"]
         : []),
+      ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
+        ? ["Follow-up behavior"]
+        : []),
       ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
         ? ["Archive confirmation"]
         : []),
@@ -551,6 +560,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.newWorktreesStartFromOrigin,
       settings.diffIgnoreWhitespace,
       settings.environmentIdentificationMode,
+      settings.followUpBehavior,
       settings.fontFamilyCode,
       settings.fontFamilyComposer,
       settings.fontFamilySans,
@@ -655,6 +665,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+      followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
       confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
@@ -1771,6 +1782,11 @@ export function GeneralSettingsPanel() {
     readLastEnabledProjectGroupingMode(),
   );
   const observability = useAtomValue(primaryServerObservabilityAtom);
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const followUpOverrideShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "composer.followUpOverride"),
+    [keybindings],
+  );
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const diagnosticsDescription = formatDiagnosticsDescription({
     localTracingEnabled: observability?.localTracingEnabled ?? false,
@@ -2201,6 +2217,46 @@ export function GeneralSettingsPanel() {
               spellCheck={false}
               aria-label="Add project base directory"
             />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("follow-up-behavior")}
+          description={`Choose what sending does while a run is active: queue the message for when the agent goes idle, steer the current run with it, or interrupt the run and send it next. Press ${followUpOverrideShortcutLabel ?? "the override shortcut"} to do the opposite for one message.`}
+          resetAction={
+            settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
+              <SettingResetButton
+                label="follow-up behavior"
+                onClick={() =>
+                  updateSettings({
+                    followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ToggleGroup
+              className="shrink-0"
+              size="sm"
+              value={[settings.followUpBehavior]}
+              onValueChange={(value) => {
+                const next = value[0];
+                if (next === "queue" || next === "steer" || next === "interrupt") {
+                  updateSettings({ followUpBehavior: next });
+                }
+              }}
+            >
+              <Toggle aria-label="Queue follow-ups" value="queue" variant="ghost">
+                Queue
+              </Toggle>
+              <Toggle aria-label="Steer the current run" value="steer" variant="ghost">
+                Steer
+              </Toggle>
+              <Toggle aria-label="Interrupt the current run" value="interrupt" variant="ghost">
+                Interrupt
+              </Toggle>
+            </ToggleGroup>
           }
         />
 

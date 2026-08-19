@@ -23,6 +23,7 @@ const clientSettings: ClientSettings = {
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   environmentIdentificationMode: "artwork",
+  followUpBehavior: "queue",
   favorites: [],
   fontFamilyCode: "",
   fontFamilyComposer: "",

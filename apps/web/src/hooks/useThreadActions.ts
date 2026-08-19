@@ -13,7 +13,9 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef } from "react";
 
-import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../components/Sidebar.logic";
+import { orderKeyBetween } from "@t3tools/shared/orderKey";
+
+import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
@@ -108,7 +110,7 @@ function topOfPinnedRunOrderKey(): string | undefined {
     if (shell.pinnedAt == null || shell.pinOrderKey == null) continue;
     if (firstKey === null || shell.pinOrderKey < firstKey) firstKey = shell.pinOrderKey;
   }
-  return pinOrderKeyBetween(null, firstKey) ?? undefined;
+  return orderKeyBetween(null, firstKey) ?? undefined;
 }
 
 export class ThreadPinningUnsupportedError extends Schema.TaggedErrorClass<ThreadPinningUnsupportedError>()(

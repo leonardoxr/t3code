@@ -33,6 +33,22 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
+describe("ClientSettings follow-up behavior", () => {
+  it("defaults to steering, so existing users notice no change", () => {
+    expect(decodeClientSettings({}).followUpBehavior).toBe("steer");
+  });
+
+  it.each(["queue", "steer", "interrupt"])("accepts %s", (value) => {
+    expect(decodeClientSettings({ followUpBehavior: value }).followUpBehavior).toBe(value);
+    expect(decodeClientSettingsPatch({ followUpBehavior: value }).followUpBehavior).toBe(value);
+  });
+
+  it.each(["stop", "", "Queue"])("rejects %s", (value) => {
+    expect(() => decodeClientSettings({ followUpBehavior: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ followUpBehavior: value })).toThrow();
+  });
+});
+
 describe("ClientSettings glass opacity", () => {
   it("defaults to a readable translucent surface", () => {
     expect(decodeClientSettings({}).glassOpacity).toBe(80);

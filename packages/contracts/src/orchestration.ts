@@ -375,6 +375,42 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+export const QueuedFollowUpId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
+export type QueuedFollowUpId = typeof QueuedFollowUpId.Type;
+
+/**
+ * Queue lifecycle for a follow-up the user parked instead of steering with:
+ * `pending` auto-dispatches as soon as the thread is genuinely idle, `paused`
+ * is held because the user stopped or interrupted the run (stop must actually
+ * stop what happens next), and `failed` blocks the queue until the user
+ * retries or removes it.
+ */
+export const OrchestrationQueuedFollowUpStatus = Schema.Literals(["pending", "paused", "failed"]);
+export type OrchestrationQueuedFollowUpStatus = typeof OrchestrationQueuedFollowUpStatus.Type;
+
+/** Bounds per-thread queue state; the composer refuses to queue past this. */
+export const MAX_QUEUED_FOLLOW_UPS_PER_THREAD = 20;
+
+export const OrchestrationQueuedFollowUp = Schema.Struct({
+  id: QueuedFollowUpId,
+  text: Schema.String,
+  attachments: Schema.Array(ChatAttachment),
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  /**
+   * Fractional index. The queue sorts by plain string comparison, so a drag
+   * writes one key to one item; keys come from the same generator as
+   * `pinOrderKey`.
+   */
+  orderKey: TrimmedNonEmptyString,
+  status: OrchestrationQueuedFollowUpStatus,
+  lastError: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationQueuedFollowUp = typeof OrchestrationQueuedFollowUp.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -411,6 +447,9 @@ export const OrchestrationThread = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // Follow-ups the user queued instead of steering with, ordered by orderKey.
+  // Optional so payloads from pre-queue servers still decode.
+  queuedFollowUps: Schema.optional(Schema.Array(OrchestrationQueuedFollowUp)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -909,6 +948,87 @@ const ThreadSessionStopCommand = Schema.Struct({
   onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
+/**
+ * Park a follow-up instead of steering the running turn with it. The canonical
+ * form carries persisted attachments; the client form carries uploads, exactly
+ * like `thread.turn.start` (see `ClientThreadFollowUpQueueCommand`).
+ *
+ * Queue position is NOT a client key: the decider derives it against the
+ * serialized read model, so firing several follow-ups faster than the queue
+ * round-trips cannot land them all on the same key. `sendNext` asks for the
+ * front of the queue instead of the back — what "interrupt and send" means when
+ * other follow-ups are already waiting.
+ */
+const ThreadFollowUpQueueCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.queue"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  text: Schema.String,
+  attachments: Schema.Array(ChatAttachment),
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  sendNext: Schema.optional(Schema.Literal(true)),
+  createdAt: IsoDateTime,
+});
+
+const ClientThreadFollowUpQueueCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.queue"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  text: Schema.String,
+  attachments: Schema.Array(UploadChatAttachment),
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  sendNext: Schema.optional(Schema.Literal(true)),
+  createdAt: IsoDateTime,
+});
+
+const ThreadFollowUpEditCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.edit"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  text: Schema.String,
+  createdAt: IsoDateTime,
+});
+
+const ThreadFollowUpRemoveCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.remove"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  createdAt: IsoDateTime,
+});
+
+const ThreadFollowUpReorderCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.reorder"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  // Fractional index between the drop position's neighbors, so a reorder
+  // writes one key to one item. Same generator as pinOrderKey.
+  orderKey: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+/**
+ * Send a queued follow-up now: steers while a turn is running, resumes a
+ * queue the user paused with stop, and retries a failed head. Dequeues the
+ * item and starts the turn in one decision, so the queue can never keep a
+ * follow-up it already sent.
+ */
+const ThreadFollowUpPromoteCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.promote"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -933,6 +1053,11 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadFollowUpQueueCommand,
+  ThreadFollowUpEditCommand,
+  ThreadFollowUpRemoveCommand,
+  ThreadFollowUpReorderCommand,
+  ThreadFollowUpPromoteCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -961,6 +1086,11 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ClientThreadFollowUpQueueCommand,
+  ThreadFollowUpEditCommand,
+  ThreadFollowUpRemoveCommand,
+  ThreadFollowUpReorderCommand,
+  ThreadFollowUpPromoteCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1037,6 +1167,21 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+/**
+ * Marks a queued follow-up the dispatcher could not hand off (a rejected
+ * promote, e.g. the thread went away). The item keeps its place and blocks
+ * auto-dispatch until the user retries or removes it — never a silent drop and
+ * never a silent retry loop.
+ */
+const ThreadFollowUpFailCommand = Schema.Struct({
+  type: Schema.Literal("thread.follow-up.fail"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  error: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1046,6 +1191,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ThreadFollowUpFailCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1085,6 +1231,12 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
+  "thread.follow-up-queued",
+  "thread.follow-up-edited",
+  "thread.follow-up-removed",
+  "thread.follow-up-reordered",
+  "thread.follow-up-paused",
+  "thread.follow-up-failed",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
@@ -1319,6 +1471,53 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
   activity: OrchestrationThreadActivity,
 });
 
+export const ThreadFollowUpQueuedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUp: OrchestrationQueuedFollowUp,
+});
+
+/**
+ * The queue was held because the user stopped or interrupted the run. An
+ * explicit fact rather than something each consumer re-derives from the
+ * interrupt: intent events are not delivered to thread subscriptions, so a
+ * derived pause would never reach a live client.
+ */
+export const ThreadFollowUpPausedPayload = Schema.Struct({
+  threadId: ThreadId,
+  pausedAt: IsoDateTime,
+});
+
+export const ThreadFollowUpEditedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  text: Schema.String,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadFollowUpRemovedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  // "dispatched" removals hand the follow-up to a turn (its attachments now
+  // belong to the message and any paused siblings resume); "user" removals
+  // cancel it and clean its attachments up.
+  reason: Schema.Literals(["user", "dispatched"]),
+  removedAt: IsoDateTime,
+});
+
+export const ThreadFollowUpReorderedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  orderKey: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadFollowUpFailedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: QueuedFollowUpId,
+  error: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
+});
+
 export const OrchestrationEventMetadata = Schema.Struct({
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -1485,6 +1684,36 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-queued"),
+    payload: ThreadFollowUpQueuedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-edited"),
+    payload: ThreadFollowUpEditedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-removed"),
+    payload: ThreadFollowUpRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-reordered"),
+    payload: ThreadFollowUpReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-paused"),
+    payload: ThreadFollowUpPausedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.follow-up-failed"),
+    payload: ThreadFollowUpFailedPayload,
   }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;

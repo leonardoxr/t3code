@@ -147,6 +147,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
+    id: "follow-up-behavior",
+    title: "Follow-up behavior",
+    to: "/settings/general",
+  },
+  {
     id: "archive-confirmation",
     title: "Archive confirmation",
     to: "/settings/general",

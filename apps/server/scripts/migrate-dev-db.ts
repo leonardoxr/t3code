@@ -300,6 +300,7 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
         "projection_turns",
         "projection_pending_approvals",
         "projection_thread_proposed_plans",
+        "projection_thread_queued_follow_ups",
         "checkpoint_diff_blobs",
       ]) {
         yield* sql.unsafe(

@@ -27,7 +27,7 @@ import {
   shouldClearThreadSelectionOnMouseDown,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
-  pinOrderKeyBetween,
+  orderKeyBetween,
   planPinnedReorder,
   sortPinnedThreadsForSidebar,
   sortThreadsForSidebar,
@@ -781,20 +781,20 @@ describe("sortThreadsForSidebar", () => {
   });
 });
 
-describe("pinOrderKeyBetween", () => {
+describe("orderKeyBetween", () => {
   it("produces keys that sort between their bounds", () => {
-    const middle = pinOrderKeyBetween(null, null)!;
-    const top = pinOrderKeyBetween(null, middle)!;
-    const bottom = pinOrderKeyBetween(middle, null)!;
+    const middle = orderKeyBetween(null, null)!;
+    const top = orderKeyBetween(null, middle)!;
+    const bottom = orderKeyBetween(middle, null)!;
     expect(top < middle).toBe(true);
     expect(middle < bottom).toBe(true);
 
-    const between = pinOrderKeyBetween(top, middle)!;
+    const between = orderKeyBetween(top, middle)!;
     expect(top < between && between < middle).toBe(true);
   });
 
   it("extends into new digits when bounds are adjacent", () => {
-    const key = pinOrderKeyBetween("g", "h")!;
+    const key = orderKeyBetween("g", "h")!;
     expect("g" < key && key < "h").toBe(true);
   });
 
@@ -804,7 +804,7 @@ describe("pinOrderKeyBetween", () => {
     let head: string | null = null;
     const keys: string[] = [];
     for (let i = 0; i < 100; i += 1) {
-      const key: string = pinOrderKeyBetween(null, head)!;
+      const key: string = orderKeyBetween(null, head)!;
       expect(key).not.toBeNull();
       if (head !== null) expect(key < head).toBe(true);
       keys.push(key);
@@ -814,10 +814,10 @@ describe("pinOrderKeyBetween", () => {
   });
 
   it("stays strictly ordered under repeated middle insertion", () => {
-    let low = pinOrderKeyBetween(null, null)!;
-    let high = pinOrderKeyBetween(low, null)!;
+    let low = orderKeyBetween(null, null)!;
+    let high = orderKeyBetween(low, null)!;
     for (let i = 0; i < 100; i += 1) {
-      const key: string = pinOrderKeyBetween(low, high)!;
+      const key: string = orderKeyBetween(low, high)!;
       expect(low < key && key < high).toBe(true);
       if (i % 2 === 0) low = key;
       else high = key;
@@ -825,10 +825,10 @@ describe("pinOrderKeyBetween", () => {
   });
 
   it("returns null for corrupt or out-of-order bounds instead of throwing", () => {
-    expect(pinOrderKeyBetween("z", "a")).toBeNull();
-    expect(pinOrderKeyBetween("A!", null)).toBeNull();
-    expect(pinOrderKeyBetween(null, "ma")).toBeNull();
-    expect(pinOrderKeyBetween("m", "m")).toBeNull();
+    expect(orderKeyBetween("z", "a")).toBeNull();
+    expect(orderKeyBetween("A!", null)).toBeNull();
+    expect(orderKeyBetween(null, "ma")).toBeNull();
+    expect(orderKeyBetween("m", "m")).toBeNull();
   });
 });
 
