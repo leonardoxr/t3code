@@ -315,6 +315,7 @@ function mapSessionRow(
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
+    ...(row.providerQuietSince !== null ? { providerQuietSince: row.providerQuietSince } : {}),
     updatedAt: row.updatedAt,
   };
 }
@@ -642,6 +643,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          provider_quiet_since AS "providerQuietSince",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         ORDER BY thread_id ASC
@@ -663,6 +665,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.provider_quiet_since AS "providerQuietSince",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -688,6 +691,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.provider_quiet_since AS "providerQuietSince",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -1124,6 +1128,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          provider_quiet_since AS "providerQuietSince",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         WHERE thread_id = ${threadId}
@@ -1741,18 +1746,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(

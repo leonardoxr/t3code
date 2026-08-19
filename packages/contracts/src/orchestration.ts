@@ -304,6 +304,13 @@ export const OrchestrationSession = Schema.Struct({
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * Set while a running turn's provider has produced no inbound frame for
+   * the silence threshold: the timestamp of the last observed activity.
+   * Absent when the provider is streaming normally. Optional so payloads
+   * from older servers still decode.
+   */
+  providerQuietSince: Schema.optional(IsoDateTime),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;

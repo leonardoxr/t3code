@@ -28,6 +28,8 @@ import {
 
 import { ServerConfig } from "../../config.ts";
 import type { AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
+import { ChildProcessSpawner } from "effect/unstable/process";
+import { makeOmpAcpRuntime } from "../acp/OmpAcpSupport.ts";
 import {
   enrichOmpToolCallFiles,
   formatOmpRateLimitTurnError,
@@ -37,6 +39,7 @@ import {
   parseOmpTaskToolCall,
   parseOmpTaskToolProgress,
   parseOmpTaskToolResults,
+  resolveOmpQuietTransition,
   resolveOmpRequestedModeId,
 } from "./OmpAdapter.ts";
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
@@ -300,6 +303,69 @@ it("parseOmpTaskToolCall maps subagent task tool args to synthesized subtasks", 
   );
 });
 
+it("resolveOmpQuietTransition flags sustained silence and nothing else", () => {
+  const base = {
+    nowMillis: 200_000,
+    turnActive: true,
+    turnStartedAtMillis: 10_000,
+    lastInboundFrameAtMillis: 100_000,
+    openToolCallCount: 0,
+    pendingApprovalCount: 0,
+    pendingUserInputCount: 0,
+    quietAlreadyMarked: false,
+    thresholdMillis: 75_000,
+  };
+
+  // 100s without a frame → quiet, anchored at the last observed activity.
+  assert.deepEqual(resolveOmpQuietTransition(base), { _tag: "mark", quietSinceMillis: 100_000 });
+  // Already flagged → no repeat event.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, quietAlreadyMarked: true }), {
+    _tag: "none",
+  });
+  // Below the threshold → nothing.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, nowMillis: 174_999 }), { _tag: "none" });
+  // A frame arriving after the flag → clear.
+  assert.deepEqual(
+    resolveOmpQuietTransition({
+      ...base,
+      quietAlreadyMarked: true,
+      lastInboundFrameAtMillis: 190_000,
+    }),
+    { _tag: "clear" },
+  );
+
+  // A long-running tool call is not provider silence.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, openToolCallCount: 1 }), {
+    _tag: "none",
+  });
+  assert.deepEqual(
+    resolveOmpQuietTransition({ ...base, openToolCallCount: 1, quietAlreadyMarked: true }),
+    { _tag: "clear" },
+  );
+  // Waiting on the human (approval / user input) is not provider silence.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, pendingApprovalCount: 1 }), {
+    _tag: "none",
+  });
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, pendingUserInputCount: 1 }), {
+    _tag: "none",
+  });
+
+  // No frames yet: the prompt dispatch time is the baseline.
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, lastInboundFrameAtMillis: undefined }), {
+    _tag: "mark",
+    quietSinceMillis: 10_000,
+  });
+  // A prompt newer than the last frame resets the baseline (steer).
+  assert.deepEqual(resolveOmpQuietTransition({ ...base, turnStartedAtMillis: 150_000 }), {
+    _tag: "none",
+  });
+  // No turn running → settlement owns the clear; the watchdog stays silent.
+  assert.deepEqual(
+    resolveOmpQuietTransition({ ...base, turnActive: false, quietAlreadyMarked: true }),
+    { _tag: "none" },
+  );
+});
+
 it("parseOmpTaskToolProgress and parseOmpTaskToolResults read streamed task details", () => {
   const baseCall = {
     toolCallId: "tool-task-2",
@@ -393,6 +459,33 @@ it("parseOmpTaskToolProgress and parseOmpTaskToolResults read streamed task deta
 });
 
 it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
+  it.effect("stamps inbound native frames for the silence watchdog", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* Effect.promise(() => makeMockOmpWrapper());
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const runtime = yield* makeOmpAcpRuntime({
+        ompSettings: decodeOmpSettings({ binaryPath: wrapperPath }),
+        environment: process.env,
+        childProcessSpawner,
+        cwd: process.cwd(),
+        clientInfo: { name: "t3-omp-test", version: "0.0.0" },
+      }).pipe(Effect.orDie);
+
+      const before = yield* runtime.getActivitySnapshot;
+      assert.isUndefined(before.lastInboundFrameAtMillis);
+      assert.equal(before.openToolCallCount, 0);
+
+      yield* runtime.start().pipe(Effect.orDie);
+      // The prompt settles only after the mock streamed its message frames,
+      // so the snapshot deterministically reflects inbound activity.
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "hello" }] }).pipe(Effect.orDie);
+
+      const after = yield* runtime.getActivitySnapshot;
+      assert.isDefined(after.lastInboundFrameAtMillis);
+      assert.equal(after.openToolCallCount, 0);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("omp-mock-thread");

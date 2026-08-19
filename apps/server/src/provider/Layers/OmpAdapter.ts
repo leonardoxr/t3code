@@ -28,10 +28,12 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -147,6 +149,10 @@ interface OmpSessionContext {
   readonly taskProgressFingerprints: Map<string, string>;
   /** Subtasks whose terminal task.completed already went out. */
   readonly completedTaskIds: Set<string>;
+  /** Millis when the latest sendTurn bound its prompt; silence baseline. */
+  turnStartedAtMillis: number | undefined;
+  /** True while the silence watchdog has flagged the session quiet. */
+  providerQuietMarked: boolean;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
@@ -595,6 +601,61 @@ export function parseOmpTaskAsyncState(
   const asyncRecord = asyncValue as Record<string, unknown>;
   const state = readString(asyncRecord, "state");
   return state === "running" || state === "completed" || state === "failed" ? state : undefined;
+}
+
+/**
+ * How long a running turn may go without a single inbound native frame
+ * before the session is flagged quiet. The observed failure mode is omp
+ * retrying upstream 529s internally every ~60-105s without reporting;
+ * normal streaming gaps are seconds and worst-case first-token latency on
+ * huge prompts stays under ~60s, so 75s avoids false positives while
+ * flagging a real stall within ~90s.
+ */
+export const OMP_PROVIDER_QUIET_THRESHOLD_MILLIS = 75_000;
+
+export type OmpQuietTransition =
+  | { readonly _tag: "mark"; readonly quietSinceMillis: number }
+  | { readonly _tag: "clear" }
+  | { readonly _tag: "none" };
+
+/**
+ * Decides whether the silence watchdog should flag or unflag the session.
+ * Silence only counts while a turn is running with nothing legitimately
+ * outstanding: an in-flight tool call, a pending approval, or a pending
+ * user-input question all suppress it — those states wait on the tool or
+ * the human, not on the provider.
+ */
+export function resolveOmpQuietTransition(input: {
+  readonly nowMillis: number;
+  readonly turnActive: boolean;
+  readonly turnStartedAtMillis: number | undefined;
+  readonly lastInboundFrameAtMillis: number | undefined;
+  readonly openToolCallCount: number;
+  readonly pendingApprovalCount: number;
+  readonly pendingUserInputCount: number;
+  readonly quietAlreadyMarked: boolean;
+  readonly thresholdMillis: number;
+}): OmpQuietTransition {
+  if (!input.turnActive) {
+    // Settlement clears the session field through its own session update.
+    return { _tag: "none" };
+  }
+  const baselineMillis = Math.max(
+    input.turnStartedAtMillis ?? 0,
+    input.lastInboundFrameAtMillis ?? 0,
+  );
+  const eligible =
+    baselineMillis > 0 &&
+    input.openToolCallCount === 0 &&
+    input.pendingApprovalCount === 0 &&
+    input.pendingUserInputCount === 0;
+  const silent = eligible && input.nowMillis - baselineMillis >= input.thresholdMillis;
+  if (silent) {
+    return input.quietAlreadyMarked
+      ? { _tag: "none" }
+      : { _tag: "mark", quietSinceMillis: baselineMillis };
+  }
+  return input.quietAlreadyMarked ? { _tag: "clear" } : { _tag: "none" };
 }
 
 export function ompPromptSettlementBelongsToContext(input: {
@@ -1057,6 +1118,10 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
         // The turn is settling: surface any trailing thought segment before
         // the terminal event so its activity lands inside the turn.
         yield* flushReasoningBuffer(liveCtx, settleTurnId);
+        // The settlement's own session update clears providerQuietSince in
+        // the read model; only the local watchdog state needs resetting.
+        liveCtx.providerQuietMarked = false;
+        liveCtx.turnStartedAtMillis = undefined;
         // Async task jobs can outlive the turn inside omp, but the wire can
         // no longer update their rows once the turn is gone — mark them
         // backgrounded instead of leaving a live "working" state behind.
@@ -1492,6 +1557,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             taskToolSubtasks,
             taskProgressFingerprints: new Map(),
             completedTaskIds: new Set(),
+            turnStartedAtMillis: undefined,
+            providerQuietMarked: false,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
@@ -1698,6 +1765,53 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;
 
+          // Silence watchdog: flags the session quiet when a running turn has
+          // produced no inbound native frame for the threshold, and clears the
+          // flag when frames resume. Transition-only — two events per stall
+          // episode, nothing per tick.
+          yield* Effect.gen(function* () {
+            const liveCtx = sessions.get(input.threadId);
+            if (!liveCtx || liveCtx.stopped) {
+              return;
+            }
+            const snapshot = yield* liveCtx.acp.getActivitySnapshot;
+            const nowMillis = yield* Clock.currentTimeMillis;
+            const transition = resolveOmpQuietTransition({
+              nowMillis,
+              turnActive: liveCtx.activeTurnId !== undefined && liveCtx.promptsInFlight > 0,
+              turnStartedAtMillis: liveCtx.turnStartedAtMillis,
+              lastInboundFrameAtMillis: snapshot.lastInboundFrameAtMillis,
+              openToolCallCount: snapshot.openToolCallCount,
+              pendingApprovalCount: liveCtx.pendingApprovals.size,
+              pendingUserInputCount: liveCtx.pendingUserInputs.size,
+              quietAlreadyMarked: liveCtx.providerQuietMarked,
+              thresholdMillis: OMP_PROVIDER_QUIET_THRESHOLD_MILLIS,
+            });
+            if (transition._tag === "none") {
+              return;
+            }
+            liveCtx.providerQuietMarked = transition._tag === "mark";
+            yield* offerRuntimeEvent({
+              type: "session.state.changed",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: liveCtx.threadId,
+              payload: {
+                state: "running",
+                providerQuietSince:
+                  transition._tag === "mark"
+                    ? DateTime.formatIso(DateTime.makeUnsafe(transition.quietSinceMillis))
+                    : null,
+              },
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Oh My Pi silence watchdog tick failed.", { cause }),
+            ),
+            Effect.repeat(Schedule.spaced("15 seconds")),
+            Effect.forkIn(ctx.scope),
+          );
+
           yield* offerRuntimeEvent({
             type: "session.started",
             ...(yield* makeEventStamp()),
@@ -1739,6 +1853,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             // resolving from here on does not settle the turn; decremented on
             // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
+            // Every prompt (new turn or steer) resets the silence baseline:
+            // the provider legitimately owes nothing until it starts working.
+            ctx.turnStartedAtMillis = yield* Clock.currentTimeMillis;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;

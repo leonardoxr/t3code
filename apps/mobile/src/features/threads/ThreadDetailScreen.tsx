@@ -51,6 +51,8 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/AppText";
 import { ControlPill } from "../../components/ControlPill";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
@@ -88,6 +90,8 @@ export interface ThreadDetailScreenProps {
   readonly environmentLabel: string | null;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly activeWorkStartedAt: string | null;
+  /** Set while the running provider has gone quiet (no frames); ISO timestamp. */
+  readonly providerQuietSince: string | null;
   readonly activePendingApproval: PendingApproval | null;
   readonly respondingApprovalId: ApprovalRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
@@ -572,6 +576,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     feedTouchStartRef.current = null;
   }, []);
 
+  // The banner needs no dismissal state: the server clears lastError (and
+  // leaves the error status) when the session next reaches ready.
+  const session = props.selectedThread.session;
+  const sessionErrorMessage = session?.status === "error" ? (session.lastError ?? null) : null;
+
   return (
     <View className="flex-1">
       {showContent ? (
@@ -592,6 +601,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             agentLabel={agentLabel}
             latestTurn={props.selectedThread.latestTurn}
             activeWorkStartedAt={props.activeWorkStartedAt}
+            providerQuietSince={props.providerQuietSince}
             listRef={listRef}
             freeze={freeze}
             anchorMessageId={anchorMessageId}
@@ -710,6 +720,33 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 </Animated.View>
               ) : null}
             </View>
+
+            {sessionErrorMessage ? (
+              <View className="w-full self-center px-4 pb-3" style={{ maxWidth: contentMaxWidth }}>
+                {/* Opaque for the same reason as PendingApprovalCard: nothing
+                    blurs the feed behind this banner. */}
+                <View className="gap-1.5 rounded-[20px] border border-rose-200 bg-rose-50 p-4 dark:border-rose-500/30 dark:bg-neutral-900">
+                  <View className="flex-row items-center gap-1.5">
+                    <SymbolView
+                      name="exclamationmark.triangle"
+                      size={12}
+                      tintColor="#ff453a"
+                      type="monochrome"
+                    />
+                    <Text className="font-t3-bold text-2xs uppercase tracking-[1.1px] text-rose-700 dark:text-rose-300">
+                      Agent error
+                    </Text>
+                  </View>
+                  <Text
+                    selectable
+                    numberOfLines={6}
+                    className="font-sans text-sm leading-normal text-rose-900 dark:text-rose-200"
+                  >
+                    {sessionErrorMessage}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
 
             {/* Hidden (not unmounted) while a user-input request owns the
                 composer slot, so composer drafts and editor state survive. */}

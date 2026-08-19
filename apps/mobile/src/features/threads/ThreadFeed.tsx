@@ -129,6 +129,8 @@ const TURN_FOLD_HEIGHT = 56; // min-h-11 (44) + mb-3 (12)
 // The working row has no min-height clamp — its height follows the scaled
 // text-xs line height (see workingRowHeight in ThreadFeed).
 const WORKING_ROW_VERTICAL_EXTRAS = 24; // py-1 (8) + mb-4 (16)
+// The quiet variant stacks a second text-xs line under the first (gap-1).
+const QUIET_WORKING_ROW_GAP = 4;
 
 // Entering animations must only play for rows born just now — LegendList
 // remounts rows when they scroll back into view, and replaying an entrance for
@@ -148,6 +150,8 @@ export interface ThreadFeedProps {
   readonly agentLabel: string;
   readonly latestTurn: ThreadFeedLatestTurn | null;
   readonly activeWorkStartedAt: string | null;
+  /** Set while the running provider has gone quiet (no frames); ISO timestamp. */
+  readonly providerQuietSince: string | null;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
@@ -799,6 +803,7 @@ function renderFeedEntry(
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
     readonly unsettledTurnId: TurnId | null;
+    readonly providerQuietSince: string | null;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string) => void;
     readonly onToggleWorkRow: (rowId: string) => void;
@@ -817,7 +822,7 @@ function renderFeedEntry(
   const { markdownStyles, iconSubtleColor, userBubbleColor } = props;
 
   if (entry.type === "working") {
-    return <WorkingTimelineRow startedAt={entry.createdAt} />;
+    return <WorkingTimelineRow startedAt={entry.createdAt} quietSince={props.providerQuietSince} />;
   }
 
   if (entry.type === "turn-fold") {
@@ -1010,7 +1015,10 @@ function renderFeedEntry(
   );
 }
 
-const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly startedAt: string }) {
+const WorkingTimelineRow = memo(function WorkingTimelineRow(props: {
+  readonly startedAt: string;
+  readonly quietSince?: string | null;
+}) {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -1019,6 +1027,28 @@ const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly st
     }, 1_000);
     return () => clearInterval(intervalId);
   }, [props.startedAt]);
+
+  if (props.quietSince) {
+    const quietLabel = formatElapsed(props.quietSince, new Date(nowMs).toISOString()) ?? "0s";
+    return (
+      <View className="mb-4 gap-1 px-1.5 py-1">
+        <View className="flex-row items-center gap-2">
+          <SymbolView
+            name="exclamationmark.triangle"
+            size={12}
+            tintColor="#ff9f0a"
+            type="monochrome"
+          />
+          <Text className="font-t3-medium text-xs tabular-nums text-amber-700 dark:text-amber-300">
+            No output from the provider for {quietLabel}
+          </Text>
+        </View>
+        <Text className="font-t3-medium text-xs text-neutral-600 dark:text-neutral-400">
+          Still waiting — you can stop the turn.
+        </Text>
+      </View>
+    );
+  }
 
   const durationLabel = formatElapsed(props.startedAt, new Date(nowMs).toISOString()) ?? "0s";
 
@@ -1768,9 +1798,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // exact; message rows stay undefined and use LegendList's per-type running
   // average once one of their type has been measured. Text-driven heights
   // follow the configurable base font size via scaledTypographyLineHeight.
+  const workingLineHeight = scaledTypographyLineHeight(
+    MOBILE_TYPOGRAPHY.label,
+    appearance.baseFontSize,
+  );
   const workingRowHeight =
     WORKING_ROW_VERTICAL_EXTRAS +
-    scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.label, appearance.baseFontSize);
+    (props.providerQuietSince ? workingLineHeight * 2 + QUIET_WORKING_ROW_GAP : workingLineHeight);
   const getFixedItemSize = useCallback(
     (entry: ThreadFeedEntry) => {
       switch (entry.type) {
@@ -1804,6 +1838,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         expandedWorkRows,
         terminalAssistantMessageIds,
         unsettledTurnId,
+        providerQuietSince: props.providerQuietSince,
         onCopyWorkRow,
         onToggleWorkGroup,
         onToggleWorkRow,
@@ -1823,6 +1858,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       expandedWorkRows,
       terminalAssistantMessageIds,
       unsettledTurnId,
+      props.providerQuietSince,
       iconSubtleColor,
       userBubbleColor,
       markdownStyles,
