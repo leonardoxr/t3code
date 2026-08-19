@@ -3,7 +3,8 @@ import Svg, { Path } from "react-native-svg";
 
 /**
  * The "T3" brand mark, matching the desktop sidebar's T3Wordmark SVG
- * (apps/web Sidebar.tsx). Width derives from the viewBox aspect ratio.
+ * (apps/web sidebar/SidebarChrome.tsx). Width derives from the viewBox aspect
+ * ratio.
  */
 export function T3Wordmark(props: { readonly height: number; readonly color: ColorValue }) {
   const aspectRatio = 94.3941 / 56.96;

@@ -40,14 +40,12 @@ export function HomeRouteScreen() {
   const {
     archiveThread,
     confirmDeleteThread,
-    settleThread,
     snoozeThread,
     unsnoozeThread,
     pinThread,
     unpinThread,
     movePinnedThread,
     regenerateThreadTitle,
-    unsettleThread,
   } = useThreadListActions();
   const pendingTasks = usePendingNewTasks();
   const { openPendingTask, confirmDeletePendingTask } = usePendingTaskListActions();
@@ -181,10 +179,8 @@ export function HomeRouteScreen() {
           }
           onArchiveThread={archiveThread}
           onDeleteThread={confirmDeleteThread}
-          onSettleThread={settleThread}
           onSnoozeThread={snoozeThread}
           onUnsnoozeThread={unsnoozeThread}
-          onUnsettleThread={unsettleThread}
           onPinThread={pinThread}
           onUnpinThread={unpinThread}
           onMovePinnedThread={movePinnedThread}
@@ -200,8 +196,6 @@ export function HomeRouteScreen() {
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
           onSelectThread={(thread) => {
-            // Settled threads are live shells: opening one is plain
-            // navigation, and sending a message un-settles server-side.
             navigation.navigate("Thread", {
               environmentId: thread.environmentId,
               threadId: thread.id,

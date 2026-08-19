@@ -4,10 +4,17 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
+import {
+  canSnooze,
+  effectiveSnoozed,
+  resolveSnoozePresets,
+  snoozeWakeLabel,
+  type SnoozePreset,
+} from "@t3tools/client-runtime/state/thread-snooze";
 import type { MenuAction } from "@react-native-menu/menu";
 import { SymbolView } from "../../components/AppSymbol";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
-import { Pressable, useWindowDimensions, View } from "react-native";
+import { Alert, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import Svg, { Circle, Path } from "react-native-svg";
@@ -25,6 +32,11 @@ import { useThreadPr, type ThreadPr } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
+import {
+  buildSnoozePresetMenuItems,
+  buildThreadSnoozeMenuItems,
+  resolveSnoozeMenuSelection,
+} from "./thread-snooze-menu";
 import { resolveThreadStatus } from "./threadPresentation";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
@@ -415,6 +427,8 @@ const THREAD_ROW_MENU_ACTIONS: MenuAction[] = [
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
 ];
 
+const NO_SNOOZE_PRESETS: ReadonlyArray<SnoozePreset> = [];
+
 export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly variant: ThreadListVariant;
   readonly thread: EnvironmentThreadShell;
@@ -427,10 +441,30 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly selected?: boolean;
   /** Defaults to window width minus compact margins. */
   readonly fullSwipeWidth?: number;
+  /** Parent minute tick. Passed as a prop so this memoized row re-runs the
+      snooze gate, its wake countdown and the native menu's preset times
+      while it stays mounted. */
+  readonly snoozeMinute: string;
+  /** False on servers that predate thread.snooze/unsnooze. */
+  readonly snoozeSupported: boolean;
+  /** False on servers that predate thread.pin/unpin. */
+  readonly pinningSupported: boolean;
+  /** False on servers that predate thread.pin.reorder. Gates the pinned
+      Move up / Move down menu items. */
+  readonly pinReorderSupported?: boolean;
+  /** Position flags so the menu disables the move that would fall off the
+      end of the pinned block. */
+  readonly canMovePinnedUp?: boolean;
+  readonly canMovePinnedDown?: boolean;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
+  readonly onSnoozeThread: (thread: EnvironmentThreadShell, snoozedUntil: string) => void;
+  readonly onUnsnoozeThread: (thread: EnvironmentThreadShell) => void;
+  readonly onPinThread: (thread: EnvironmentThreadShell) => void;
+  readonly onUnpinThread: (thread: EnvironmentThreadShell) => void;
+  readonly onMovePinnedThread?: (thread: EnvironmentThreadShell, direction: "up" | "down") => void;
   readonly titleRegenerationSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
@@ -448,20 +482,50 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const separatorColor = useThemeColor("--color-separator");
   const iconSubtleColor = useThemeColor("--color-icon-subtle");
+  const iconMutedColor = useThemeColor("--color-icon-muted");
   const screenColor = useThemeColor("--color-screen");
   const drawerColor = useThemeColor("--color-drawer");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
   const selectedBackgroundColor = useThemeColor("--color-user-bubble");
   const selectedForegroundColor = useThemeColor("--color-user-bubble-foreground");
 
-  const { thread, onSelectThread, onArchiveThread, onDeleteThread, onRegenerateThreadTitle } =
-    props;
+  const {
+    thread,
+    onSelectThread,
+    onArchiveThread,
+    onDeleteThread,
+    onRegenerateThreadTitle,
+    onSnoozeThread,
+    onUnsnoozeThread,
+    onPinThread,
+    onUnpinThread,
+    onMovePinnedThread,
+  } = props;
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread, props.projectCwd);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
-  const threadAccessibilityLabel = pr ? `${thread.title}, ${pr.accessibilityLabel}` : thread.title;
+  // Real clock, not the minute tick: the snooze gate and the wake boundary
+  // must not read a floored minute as "still snoozed" / "still starting a
+  // turn". The tick only guarantees the row re-renders to re-evaluate them.
+  const snoozeClockMinute = props.snoozeMinute;
+  const nowIso = new Date().toISOString();
+  const snoozed = effectiveSnoozed(thread, { now: nowIso });
+  const pinned = thread.pinnedAt != null;
+  const wakeLabel =
+    snoozed && thread.snoozedUntil != null
+      ? snoozeWakeLabel(thread.snoozedUntil, { now: nowIso })
+      : null;
+  const snoozable = props.snoozeSupported && !snoozed && canSnooze(thread, { now: nowIso });
+  const threadAccessibilityLabel = [
+    thread.title,
+    pinned ? "pinned" : null,
+    wakeLabel === null ? null : `snoozed, wakes in ${wakeLabel}`,
+    pr?.accessibilityLabel ?? null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(", ");
   const subtitleParts = [props.environmentLabel, thread.branch].filter((part): part is string =>
     Boolean(part),
   );
@@ -485,34 +549,154 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
+  const handleSnooze = useCallback(
+    (snoozedUntil: string) => onSnoozeThread(thread, snoozedUntil),
+    [onSnoozeThread, thread],
+  );
+  const handleUnsnooze = useCallback(() => onUnsnoozeThread(thread), [onUnsnoozeThread, thread]);
+  const handlePin = useCallback(() => onPinThread(thread), [onPinThread, thread]);
+  const handleUnpin = useCallback(() => onUnpinThread(thread), [onUnpinThread, thread]);
+  const handleMovePinnedUp = useCallback(
+    () => onMovePinnedThread?.(thread, "up"),
+    [onMovePinnedThread, thread],
+  );
+  const handleMovePinnedDown = useCallback(
+    () => onMovePinnedThread?.(thread, "down"),
+    [onMovePinnedThread, thread],
+  );
+  // Preset wake times are absolute, so they must be re-resolved as the clock
+  // moves; the parent's minute tick is what re-runs this while mounted.
+  const snoozePresets = useMemo(
+    () => (snoozable ? resolveSnoozePresets(new Date()) : NO_SNOOZE_PRESETS),
+    [snoozable, snoozeClockMinute],
+  );
+  const snoozePresetActions = useMemo(
+    () => buildSnoozePresetMenuItems(snoozePresets),
+    [snoozePresets],
+  );
+  const snoozeMenuItems = useMemo(
+    () => buildThreadSnoozeMenuItems({ snoozed, presets: snoozePresets }),
+    [snoozePresets, snoozed],
+  );
+  const pinMenuItems = useMemo<MenuAction[]>(
+    () =>
+      props.pinningSupported
+        ? [
+            ...(pinned && props.pinReorderSupported === true
+              ? [
+                  {
+                    id: "move-pin-up",
+                    title: "Move up",
+                    image: "arrow.up",
+                    attributes: { disabled: props.canMovePinnedUp !== true },
+                  } satisfies MenuAction,
+                  {
+                    id: "move-pin-down",
+                    title: "Move down",
+                    image: "arrow.down",
+                    attributes: { disabled: props.canMovePinnedDown !== true },
+                  } satisfies MenuAction,
+                ]
+              : []),
+            pinned
+              ? { id: "unpin", title: "Unpin", image: "pin.slash" }
+              : { id: "pin", title: "Pin", image: "pin" },
+          ]
+        : [],
+    [
+      pinned,
+      props.canMovePinnedDown,
+      props.canMovePinnedUp,
+      props.pinReorderSupported,
+      props.pinningSupported,
+    ],
+  );
   const menuActions = useMemo<MenuAction[]>(
     () => [
       THREAD_ROW_MENU_ACTIONS[0]!,
+      ...snoozeMenuItems,
+      ...pinMenuItems,
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
       THREAD_ROW_MENU_ACTIONS[1]!,
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [pinMenuItems, props.titleRegenerationSupported, snoozeMenuItems, thread.titleRegeneration],
   );
+  // Swipe: a snoozed row's one-tap action is waking it; every other row keeps
+  // v1's Archive. Delete stays behind the second slot unless Snooze claims it.
   const primaryAction = useMemo(
-    () => ({
-      accessibilityLabel: `Archive ${thread.title}`,
-      icon: "archivebox" as const,
-      label: "Archive",
-      onPress: handleArchive,
-    }),
-    [handleArchive, thread.title],
+    () =>
+      snoozed
+        ? {
+            accessibilityLabel: `Wake ${thread.title} now`,
+            icon: "clock" as const,
+            label: "Wake",
+            onPress: handleUnsnooze,
+          }
+        : {
+            accessibilityLabel: `Archive ${thread.title}`,
+            icon: "archivebox" as const,
+            label: "Archive",
+            onPress: handleArchive,
+          },
+    [handleArchive, handleUnsnooze, snoozed, thread.title],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "delete") handleDelete();
+      if (nativeEvent.event === "unsnooze") handleUnsnooze();
+      if (nativeEvent.event === "pin") handlePin();
+      if (nativeEvent.event === "unpin") handleUnpin();
+      if (nativeEvent.event === "move-pin-up") handleMovePinnedUp();
+      if (nativeEvent.event === "move-pin-down") handleMovePinnedDown();
+      const selection = resolveSnoozeMenuSelection({
+        event: nativeEvent.event,
+        displayedPresets: snoozePresets,
+        now: new Date(),
+      });
+      if (selection._tag === "selected") {
+        handleSnooze(selection.preset.snoozedUntil);
+      } else if (selection._tag === "expired") {
+        Alert.alert("Could not snooze thread", "That snooze time has passed. Choose another time.");
+      }
     },
-    [handleArchive, handleDelete, handleRegenerateTitle],
+    [
+      handleArchive,
+      handleDelete,
+      handleMovePinnedDown,
+      handleMovePinnedUp,
+      handlePin,
+      handleRegenerateTitle,
+      handleSnooze,
+      handleUnpin,
+      handleUnsnooze,
+      snoozePresets,
+    ],
   );
+  const secondaryAction = useMemo(
+    () =>
+      snoozable
+        ? {
+            accessibilityLabel: `Choose when to snooze ${thread.title}`,
+            icon: "clock" as const,
+            label: "Snooze",
+            menu: {
+              actions: snoozePresetActions,
+              onPressAction: handleMenuAction,
+              title: "Snooze until",
+            },
+            onPress: () => undefined,
+          }
+        : undefined,
+    [handleMenuAction, snoozable, snoozePresetActions, thread.title],
+  );
+  const swipeAccessibilityHint = snoozable
+    ? `Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions`
+    : `Swipe left for ${primaryAction.label.toLowerCase()} and delete actions`;
 
   const statusPill = effectiveStatus ? (
     <View className={`${effectiveStatus.pillClassName} rounded-full px-1.5 py-0.5`}>
@@ -565,7 +749,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const rowContent = (close: () => void) =>
     compact ? (
       <Pressable
-        accessibilityHint="Swipe left for archive and delete actions"
+        accessibilityHint={swipeAccessibilityHint}
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         className="bg-screen"
@@ -596,7 +780,26 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               </Text>
               <View className="flex-row items-center gap-2">
                 {statusPill}
-                <Text className="text-base tabular-nums text-foreground-tertiary">{timestamp}</Text>
+                {pinned ? (
+                  <SymbolView name="pin" size={11} tintColor={iconMutedColor} type="monochrome" />
+                ) : null}
+                {wakeLabel === null ? (
+                  <Text className="text-base tabular-nums text-foreground-tertiary">
+                    {timestamp}
+                  </Text>
+                ) : (
+                  <View className="flex-row items-center gap-1">
+                    <SymbolView
+                      name="clock"
+                      size={11}
+                      tintColor={iconMutedColor}
+                      type="monochrome"
+                    />
+                    <Text className="text-base tabular-nums text-foreground-tertiary">
+                      {wakeLabel}
+                    </Text>
+                  </View>
+                )}
                 <SymbolView
                   name="chevron.right"
                   size={13}
@@ -618,7 +821,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       </Pressable>
     ) : (
       <Pressable
-        accessibilityHint="Opens the thread"
+        accessibilityHint={`Opens the thread. ${swipeAccessibilityHint}.`}
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
@@ -655,6 +858,22 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             </Text>
             <View className="flex-row items-center gap-2">
               {statusPill}
+              {pinned ? (
+                <SymbolView
+                  name="pin"
+                  size={10}
+                  tintColor={selected ? String(selectedForegroundColor) : iconMutedColor}
+                  type="monochrome"
+                />
+              ) : null}
+              {wakeLabel !== null ? (
+                <SymbolView
+                  name="clock"
+                  size={10}
+                  tintColor={selected ? String(selectedForegroundColor) : iconMutedColor}
+                  type="monochrome"
+                />
+              ) : null}
               <Text
                 className={cn(
                   "text-xs tabular-nums",
@@ -662,7 +881,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
                 )}
                 numberOfLines={1}
               >
-                {timestamp}
+                {wakeLabel ?? timestamp}
               </Text>
             </View>
           </View>
@@ -690,6 +909,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       onSwipeableClose={props.onSwipeableClose}
       onSwipeableWillOpen={props.onSwipeableWillOpen}
       primaryAction={primaryAction}
+      secondaryAction={secondaryAction}
       resetKey={`${thread.environmentId}:${thread.id}`}
       simultaneousWithExternalGesture={props.simultaneousSwipeGesture}
       threadTitle={thread.title}

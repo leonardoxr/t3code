@@ -5,12 +5,11 @@ import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./thread
 const baseState: ThreadActionMenuState = {
   branch: null,
   isPinned: false,
-  isSettled: false,
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
-  supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
+  supports: { snooze: true, pinning: true, titleRegeneration: true },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
@@ -25,7 +24,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: { snooze: false, pinning: false, titleRegeneration: false },
       }),
     ).toEqual(["rename", "mark-unread", "copy-path", "copy-thread-id", "archive", "delete"]);
   });
@@ -39,10 +38,10 @@ describe("buildThreadActionMenuItems", () => {
   });
 
   it("flips lifecycle labels with thread state", () => {
-    expect(ids({ ...baseState, isPinned: true, isSettled: true, isSnoozed: true })).toEqual(
-      expect.arrayContaining(["unpin", "unsettle", "unsnooze"]),
+    expect(ids({ ...baseState, isPinned: true, isSnoozed: true })).toEqual(
+      expect.arrayContaining(["unpin", "unsnooze"]),
     );
-    expect(ids(baseState)).toEqual(expect.arrayContaining(["pin", "settle", "snooze"]));
+    expect(ids(baseState)).toEqual(expect.arrayContaining(["pin", "snooze"]));
   });
 
   it("disables snooze when the thread cannot snooze, keeping presets visible", () => {
@@ -77,7 +76,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: { snooze: false, pinning: false, titleRegeneration: false },
       }),
     ).toContain("archive");
   });

@@ -41,7 +41,6 @@ function makeReadModel(input: {
   readonly queuedFollowUps?: ReadonlyArray<OrchestrationQueuedFollowUp>;
   readonly runtimeMode?: OrchestrationThread["runtimeMode"];
   readonly interactionMode?: OrchestrationThread["interactionMode"];
-  readonly settledOverride?: OrchestrationThread["settledOverride"];
   readonly session?: OrchestrationSession | null;
 }): OrchestrationReadModel {
   return {
@@ -61,8 +60,6 @@ function makeReadModel(input: {
         createdAt: NOW,
         updatedAt: NOW,
         archivedAt: null,
-        settledOverride: input.settledOverride ?? null,
-        settledAt: input.settledOverride === "settled" ? NOW : null,
         snoozedUntil: null,
         snoozedAt: null,
         deletedAt: null,
@@ -220,7 +217,6 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
           readModel: makeReadModel({
             runtimeMode: "full-access",
             interactionMode: "default",
-            settledOverride: "settled",
             queuedFollowUps: [
               makeQueuedFollowUp({
                 id: "follow-up-1",
@@ -237,7 +233,6 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
         });
         const events = Array.isArray(decided) ? decided : [decided];
         expect(events.map((event) => event.type)).toEqual([
-          "thread.unsettled",
           "thread.runtime-mode-set",
           "thread.interaction-mode-set",
           "thread.message-sent",
@@ -286,45 +281,6 @@ it.layer(NodeServices.layer)("queued follow-up decider", (it) => {
         followUpId: "follow-up-1",
         error: "thread was archived",
       });
-    }),
-  );
-
-  it.effect("drops a settle-cleanup session stop while a follow-up is still pending", () =>
-    Effect.gen(function* () {
-      const result = yield* decideOrchestrationCommand({
-        command: {
-          type: "thread.session.stop",
-          commandId: CommandId.make("cmd-stop"),
-          threadId: THREAD_ID,
-          createdAt: NOW,
-          onlyIfSettled: true,
-        },
-        readModel: makeReadModel({
-          settledOverride: "settled",
-          queuedFollowUps: [makeQueuedFollowUp({ id: "follow-up-1", status: "pending" })],
-        }),
-      }).pipe(Effect.flip);
-      expect(result._tag).toBe("OrchestrationCommandInvariantError");
-    }),
-  );
-
-  it.effect("allows a settle-cleanup session stop when the queue is only paused", () =>
-    Effect.gen(function* () {
-      const decided = yield* decideOrchestrationCommand({
-        command: {
-          type: "thread.session.stop",
-          commandId: CommandId.make("cmd-stop-paused"),
-          threadId: THREAD_ID,
-          createdAt: NOW,
-          onlyIfSettled: true,
-        },
-        readModel: makeReadModel({
-          settledOverride: "settled",
-          queuedFollowUps: [makeQueuedFollowUp({ id: "follow-up-1", status: "paused" })],
-        }),
-      });
-      const events = Array.isArray(decided) ? decided : [decided];
-      expect(events[0]?.type).toBe("thread.session-stop-requested");
     }),
   );
 });

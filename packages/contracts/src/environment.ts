@@ -51,18 +51,15 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server exposes the pull-request list, detail, activity, diff, and mutation APIs. Absent on
       servers from before the pull-request workspace shipped, so clients must not probe them. */
   pullRequests: Schema.optionalKey(Schema.Boolean),
-  /** Server understands thread.settle / thread.unsettle commands. Absent on
-      pre-settlement servers, so clients treat missing as unsupported and
-      never send the commands under version skew. */
-  threadSettlement: Schema.optionalKey(Schema.Boolean),
-  /** Server understands thread.snooze / thread.unsnooze commands. Same
-      version-skew contract as threadSettlement. */
+  /** Server understands thread.snooze / thread.unsnooze commands. Absent on
+      older servers, so clients treat missing as unsupported and never send
+      the commands under version skew. */
   threadSnooze: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin / thread.unpin commands. Same
-      version-skew contract as threadSettlement. */
+      version-skew contract as threadSnooze. */
   threadPinning: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).
-      Same version-skew contract as threadSettlement. */
+      Same version-skew contract as threadSnooze. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),
   /** Server understands regenerateTitle on thread.meta.update. Absent on
       older servers, so clients hide the action instead of sending it. */

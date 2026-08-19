@@ -66,12 +66,11 @@ characters and uses SQLite's ASCII case-insensitive matching.
 The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
 always matches the build you are running. Use that rather than a copied list.
 
-Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
-inherits the project you were in, along with model and mode selections. Branch, worktree, and
-environment mode always come from your configured defaults, not from the thread you were looking
-at. To keep a worktree, use the explicit "new thread in this worktree" action in the branch
-toolbar. The only difference between the two commands: with the current sidebar and more than one
-project, `chat.new` opens a project chooser first.
+Note that `chat.new` and `chat.newLocal` both create a thread through the same path, with no
+difference between them. A new thread inherits the project you were in, along with model and mode
+selections. Branch, worktree, and environment mode always come from your configured defaults, not
+from the thread you were looking at. To keep a worktree, use the explicit "new thread in this
+worktree" action in the branch toolbar.
 
 ## `when` Conditions
 

@@ -40,16 +40,15 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
         ('project-deleted', 'Deleted', '/tmp/deleted', '[]', '2026-08-01', '2026-08-02', '2026-08-02')`;
 
       const threads = [
-        ["stopped-thread", "project-kept", "stopped", null, null],
-        ["running-thread", "project-kept", "running", null, null],
-        ["settled-thread", "project-kept", "stopped", "2026-08-01", null],
-        ["monitored-thread", "project-kept", "stopped", null, '{"kind":"pr"}'],
-        ["deleted-project-thread", "project-deleted", "stopped", null, null],
+        ["stopped-thread", "project-kept", "stopped", null],
+        ["running-thread", "project-kept", "running", null],
+        ["monitored-thread", "project-kept", "stopped", '{"kind":"pr"}'],
+        ["deleted-project-thread", "project-deleted", "stopped", null],
       ] as const;
-      for (const [threadId, projectId, status, settledAt, monitorJson] of threads) {
+      for (const [threadId, projectId, status, monitorJson] of threads) {
         yield* sql`INSERT INTO projection_threads
-          (thread_id, project_id, title, created_at, updated_at, settled_at, monitor_json)
-          VALUES (${threadId}, ${projectId}, ${threadId}, '2026-08-01', '2026-08-01', ${settledAt}, ${monitorJson})`;
+          (thread_id, project_id, title, created_at, updated_at, monitor_json)
+          VALUES (${threadId}, ${projectId}, ${threadId}, '2026-08-01', '2026-08-01', ${monitorJson})`;
         yield* sql`INSERT INTO projection_thread_sessions (thread_id, status, updated_at)
           VALUES (${threadId}, ${status}, '2026-08-01')`;
         yield* sql`INSERT INTO orchestration_events

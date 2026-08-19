@@ -1,6 +1,4 @@
-import { effectiveSettled } from "@t3tools/client-runtime/state/thread-settled";
-import type { OrchestrationThreadShell } from "@t3tools/contracts";
-import { ProjectId, ProviderInstanceId, ThreadId, type VcsStatusResult } from "@t3tools/contracts";
+import type { VcsStatusResult } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { AtomRegistry } from "effect/unstable/reactivity";
@@ -11,7 +9,6 @@ import {
   resolveDisplayedThreadPr,
   resolveDisplayedThreadPrProvider,
   resolveThreadPr,
-  settledPrHoverColorClass,
   threadChangeRequestSnapshotsAtom,
   type ThreadChangeRequestSnapshot,
 } from "./ThreadStatusIndicators";
@@ -376,7 +373,7 @@ describe("resolveDisplayedThreadPr + nextThreadChangeRequestSnapshot", () => {
     ).toEqual(mergedPr);
   });
 
-  it("keeps effectiveSettled true for a retained merged PR after a main checkout", () => {
+  it("keeps a retained merged PR displayed after a main checkout", () => {
     const matchingStatus = status({
       refName: featureBranch,
       pr: mergedPr,
@@ -399,36 +396,6 @@ describe("resolveDisplayedThreadPr + nextThreadChangeRequestSnapshot", () => {
       retainTerminalOnBranchMismatch: true,
     });
     expect(displayed?.state).toBe("merged");
-
-    const shell = {
-      id: ThreadId.make("thread-1"),
-      projectId: ProjectId.make("project-1"),
-      title: "Feature thread",
-      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: "main",
-      worktreePath: null,
-      latestTurn: null,
-      session: null,
-      createdAt: "2026-04-09T00:00:00.000Z",
-      updatedAt: "2026-04-09T00:00:00.000Z",
-      archivedAt: null,
-      settledAt: null,
-      settledOverride: null,
-      latestUserMessageAt: "2026-04-09T00:00:00.000Z",
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
-      hasActionableProposedPlan: false,
-    } as OrchestrationThreadShell;
-
-    expect(
-      effectiveSettled(shell, {
-        now: "2026-04-10T00:00:00.000Z",
-        autoSettleAfterDays: null,
-        changeRequest: displayed,
-      }),
-    ).toBe(true);
   });
 });
 
@@ -470,15 +437,5 @@ describe("prStatusIndicator", () => {
     expect(prStatusIndicator({ ...closedPr, state: "closed" }, undefined)?.colorClass).toContain(
       "text-red-600",
     );
-  });
-});
-
-describe("settledPrHoverColorClass", () => {
-  it.each([
-    ["open", "text-emerald-600"],
-    ["merged", "text-violet-600"],
-    ["closed", "text-red-600"],
-  ] as const)("restores the %s pull request color on row hover", (state, colorClass) => {
-    expect(settledPrHoverColorClass(state)).toContain(`group-hover/v2-row:${colorClass}`);
   });
 });
