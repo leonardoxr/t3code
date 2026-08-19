@@ -151,6 +151,38 @@ const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWor
   },
 );
 
+/**
+ * Relative form of an absolute asset path against a workspace root.
+ *
+ * Agents report the canonical path of a file they read (`/private/tmp/...`)
+ * while the project keeps the root the user typed (`/tmp/...`), so a plain
+ * relativization escapes the root whenever a root segment is a symlink —
+ * macOS `/tmp` and `/var`, or a symlinked checkout. Retry against the resolved
+ * root before giving up. This only ever swaps in the same directory under
+ * another name: containment is still enforced downstream, and against the
+ * canonical root/file pair.
+ */
+const relativizeWorkspacePath = Effect.fn("AssetAccess.relativizeWorkspacePath")(function* (input: {
+  readonly workspaceRoot: string;
+  readonly absolutePath: string;
+}) {
+  const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const direct = path.relative(input.workspaceRoot, input.absolutePath);
+  if (!direct.startsWith("..")) {
+    return direct;
+  }
+  const canonicalRoot = yield* fileSystem.realPath(input.workspaceRoot).pipe(
+    Effect.map(Option.some),
+    Effect.orElseSucceed(() => Option.none<string>()),
+  );
+  if (Option.isNone(canonicalRoot)) {
+    return direct;
+  }
+  const viaCanonicalRoot = path.relative(canonicalRoot.value, input.absolutePath);
+  return viaCanonicalRoot.startsWith("..") ? direct : viaCanonicalRoot;
+});
+
 const resolveCanonicalWorkspaceFileForRequest = (input: {
   readonly workspaceRoot: string;
   readonly relativePath: string;
@@ -196,7 +228,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         ),
       );
       const relativePath = path.isAbsolute(input.resource.path)
-        ? path.relative(workspaceRoot, input.resource.path)
+        ? yield* relativizeWorkspacePath({ workspaceRoot, absolutePath: input.resource.path })
         : input.resource.path;
       const resolved = yield* workspacePaths
         .resolveRelativePathWithinRoot({ workspaceRoot, relativePath })

@@ -1,17 +1,17 @@
 // @effect-diagnostics globalDate:off -- Tests exercise local calendar snooze boundaries.
-import { ThreadId } from "@t3tools/contracts";
-import { TurnId } from "@t3tools/contracts";
+import { ThreadId, TurnId, type OrchestrationThreadShell } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   canSnooze,
   effectiveSnoozed,
+  hasQueuedTurnStart,
   resolveSnoozePresets,
   snoozeWakeLabel,
   threadRaisedHandWhileSnoozed,
   threadWokeAt,
   type ThreadSnoozeShell,
-} from "./threadSettled.ts";
+} from "./threadSnooze.ts";
 
 const NOW = "2026-04-10T12:00:00.000Z";
 const SNOOZED_AT = "2026-04-10T09:00:00.000Z";
@@ -184,7 +184,7 @@ describe("canSnooze", () => {
     ).toBe(false);
   });
 
-  it("refuses a queued turn start — same invisible-pending-work rule as settle", () => {
+  it("refuses a queued turn start — invisible pending work stays visible", () => {
     // Fresh user message, no turn has adopted it, within the grace window.
     expect(
       canSnooze(
@@ -198,6 +198,104 @@ describe("canSnooze", () => {
         { ...makeShell({}), latestUserMessageAt: "2026-04-10T11:00:00.000Z" },
         { now: NOW },
       ),
+    ).toBe(true);
+  });
+});
+
+describe("hasQueuedTurnStart", () => {
+  const QUEUED_AT = "2026-04-09T12:00:00.000Z";
+  // Within the adoption grace window of the queued message.
+  const JUST_AFTER = { now: "2026-04-09T12:00:30.000Z" };
+  const OLDER_TURN_AT = "2026-04-09T00:00:00.000Z";
+
+  function makeQueuedShell(input: {
+    readonly latestUserMessageAt?: string | null;
+    readonly turnRequestedAt?: string;
+    readonly sessionStatus?: "error";
+  }): Pick<OrchestrationThreadShell, "latestUserMessageAt" | "latestTurn" | "session"> {
+    return {
+      latestUserMessageAt: input.latestUserMessageAt ?? null,
+      latestTurn:
+        input.turnRequestedAt === undefined
+          ? null
+          : {
+              turnId: TurnId.make("turn-1"),
+              state: "completed",
+              requestedAt: input.turnRequestedAt,
+              startedAt: null,
+              completedAt: null,
+              assistantMessageId: null,
+            },
+      session:
+        input.sessionStatus === undefined
+          ? null
+          : {
+              threadId: ThreadId.make("thread-1"),
+              status: input.sessionStatus,
+              providerName: "Codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: "boom",
+              updatedAt: NOW,
+            },
+    };
+  }
+
+  it("flags a user message no turn has picked up, within the grace window", () => {
+    expect(
+      hasQueuedTurnStart(makeQueuedShell({ latestUserMessageAt: QUEUED_AT }), JUST_AFTER),
+    ).toBe(true);
+    // A turn that predates the message never adopted it either.
+    expect(
+      hasQueuedTurnStart(
+        makeQueuedShell({ latestUserMessageAt: QUEUED_AT, turnRequestedAt: OLDER_TURN_AT }),
+        JUST_AFTER,
+      ),
+    ).toBe(true);
+  });
+
+  it("expires after the grace window: an unadopted message is a failed start, not queued work", () => {
+    const queued = makeQueuedShell({ latestUserMessageAt: QUEUED_AT });
+    expect(hasQueuedTurnStart(queued, { now: "2026-04-09T12:03:00.000Z" })).toBe(false);
+    // Historical shells (e.g. from servers that never carried latestTurn)
+    // must never read as queued.
+    expect(hasQueuedTurnStart(queued, { now: NOW })).toBe(false);
+  });
+
+  it("clears once a turn adopts the message or the start fails", () => {
+    expect(
+      hasQueuedTurnStart(
+        makeQueuedShell({ latestUserMessageAt: QUEUED_AT, turnRequestedAt: QUEUED_AT }),
+        JUST_AFTER,
+      ),
+    ).toBe(false);
+    expect(
+      hasQueuedTurnStart(
+        makeQueuedShell({ latestUserMessageAt: QUEUED_AT, sessionStatus: "error" }),
+        JUST_AFTER,
+      ),
+    ).toBe(false);
+  });
+
+  it("is quiet without user messages", () => {
+    expect(
+      hasQueuedTurnStart(makeQueuedShell({ turnRequestedAt: OLDER_TURN_AT }), JUST_AFTER),
+    ).toBe(false);
+  });
+
+  it("bounds the grace window in both directions: a future-stamped message is skew, not queued work", () => {
+    // Message timestamps originate on other devices; a clock an hour ahead
+    // must not hold the queued state for the whole skew.
+    expect(
+      hasQueuedTurnStart(makeQueuedShell({ latestUserMessageAt: "2026-04-09T13:00:00.000Z" }), {
+        now: QUEUED_AT,
+      }),
+    ).toBe(false);
+    // A small negative age (within the grace window) still reads as queued.
+    expect(
+      hasQueuedTurnStart(makeQueuedShell({ latestUserMessageAt: "2026-04-09T12:00:30.000Z" }), {
+        now: QUEUED_AT,
+      }),
     ).toBe(true);
   });
 });

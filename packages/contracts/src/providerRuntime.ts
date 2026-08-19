@@ -417,6 +417,13 @@ export const ItemLifecyclePayload = Schema.Struct({
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   data: Schema.optional(Schema.Unknown),
   /**
+   * Absolute path of an image the agent looked at during this tool call —
+   * Codex `view_image`, a Claude/OpenCode file read that resolves to an image.
+   * Clients turn it into a signed workspace-file asset URL and render the
+   * image inline in the timeline, so the bytes never ride the socket.
+   */
+  imagePath: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
    * Owning agent when this item ran inside a subagent (resolved from the
    * SDK's parent_tool_use_id). Clients re-home attributed items out of the
    * main timeline and into the owning agent's Agents-surface row.

@@ -12,25 +12,30 @@ import type { FollowUpBehavior } from "@t3tools/contracts/settings";
 export type FollowUpDelivery = "send" | "queue" | "interrupt";
 
 /**
- * Resolve the setting (and the one-off override chord) into an action.
+ * What the submit asked for, independent of the setting.
+ *
+ * `default` is Enter: whatever Settings → Follow-up behavior says. `send` and
+ * `queue` are the two explicit chords (and the button beside Stop), and always
+ * mean the same thing no matter how the setting is configured.
+ */
+export type FollowUpIntent = "default" | "send" | "queue";
+
+/**
+ * Resolve an intent into an action.
  *
  * With no turn running there is nothing to queue behind or interrupt, so every
- * behavior just sends. The override flips between queueing and sending now;
- * when the user's default is already queue, "now" steers rather than
- * interrupts — of the two immediates it is the one that destroys no work.
+ * intent just sends. While one runs, an explicit `send` steers rather than
+ * interrupts: of the two immediates it is the one that destroys no work.
  */
 export function resolveFollowUpDelivery(input: {
   readonly behavior: FollowUpBehavior;
   readonly isRunning: boolean;
-  readonly override: boolean;
+  readonly intent: FollowUpIntent;
 }): FollowUpDelivery {
-  if (!input.isRunning) {
+  if (!input.isRunning || input.intent === "send") {
     return "send";
   }
-  if (input.behavior === "queue") {
-    return input.override ? "send" : "queue";
-  }
-  if (input.override) {
+  if (input.intent === "queue" || input.behavior === "queue") {
     return "queue";
   }
   return input.behavior === "interrupt" ? "interrupt" : "send";

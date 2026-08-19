@@ -192,4 +192,68 @@ describe("AcpCoreRuntimeEvents", () => {
       },
     });
   });
+
+  it("resolves the image an ACP tool call read from locations or raw input", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+    const readToolCallEvent = (data: Record<string, unknown>) =>
+      makeAcpToolCallEvent({
+        stamp,
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: "thread-1" as never,
+        turnId: TurnId.make("turn-1"),
+        toolCall: {
+          toolCallId: "tool-read",
+          kind: "read",
+          status: "completed",
+          title: "Read file",
+          data,
+        },
+        rawPayload: { sessionId: "session-1" },
+      });
+
+    const fromLocations = readToolCallEvent({ locations: [{ path: "/ws/shot.png" }] });
+    expect(fromLocations).toMatchObject({
+      type: "item.completed",
+      payload: {
+        // A read stays a dynamic tool call — the image path is orthogonal.
+        itemType: "dynamic_tool_call",
+        imagePath: "/ws/shot.png",
+      },
+    });
+
+    // Non-image locations fall through to the agent-shaped raw input.
+    expect(
+      readToolCallEvent({
+        locations: [{ path: "/ws/index.ts", line: 12 }],
+        rawInput: { path: "/ws/diagram.svg" },
+      }).payload,
+    ).toMatchObject({ imagePath: "/ws/diagram.svg" });
+
+    const nonImageRawInput = readToolCallEvent({ rawInput: { file_path: "/ws/notes.md" } });
+    expect(nonImageRawInput.payload).not.toHaveProperty("imagePath");
+
+    const malformedLocations = readToolCallEvent({ locations: "not-an-array" });
+    expect(malformedLocations.payload).not.toHaveProperty("imagePath");
+  });
+
+  it("leaves the image path off a tool call that edits an image instead of reading it", () => {
+    const event = makeAcpToolCallEvent({
+      stamp: { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" },
+      provider: ProviderDriverKind.make("cursor"),
+      threadId: "thread-1" as never,
+      turnId: TurnId.make("turn-1"),
+      toolCall: {
+        toolCallId: "tool-edit",
+        kind: "edit",
+        status: "completed",
+        title: "Edit file",
+        // `locations` reports edit targets too; rewriting a directory of icons
+        // must not splash them across the timeline.
+        data: { locations: [{ path: "/ws/icons/logo.svg" }] },
+      },
+      rawPayload: { sessionId: "session-1" },
+    });
+
+    expect(event.payload).not.toHaveProperty("imagePath");
+  });
 });

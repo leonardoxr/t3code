@@ -120,4 +120,78 @@ layer("OrchestrationEventStore", (it) => {
       }
     }),
   );
+
+  // The settle/unsettle lifecycle was removed, but its events are still in
+  // every database that ever used it, and replay decodes each row through the
+  // closed OrchestrationEvent union. If these two types were dropped from the
+  // contracts, those databases would fail to boot with a PersistenceDecodeError
+  // instead of ignoring inert history.
+  it.effect("replays retired thread settle lifecycle events from an existing database", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = "thread-retired-settle";
+      // The layer shares one in-memory database across this block, and a
+      // sibling test parks a deliberately corrupt row in it. Own the fixture.
+      yield* sql`DELETE FROM orchestration_events`;
+
+      const insertRetiredEvent = (input: {
+        readonly eventId: string;
+        readonly streamVersion: number;
+        readonly eventType: string;
+        readonly payload: Record<string, unknown>;
+      }) => sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          ${input.eventId},
+          ${"thread"},
+          ${threadId},
+          ${input.streamVersion},
+          ${input.eventType},
+          ${now},
+          ${null},
+          ${null},
+          ${null},
+          ${"client"},
+          ${JSON.stringify(input.payload)},
+          ${"{}"}
+        )
+      `;
+
+      yield* insertRetiredEvent({
+        eventId: "evt-retired-settled",
+        streamVersion: 0,
+        eventType: "thread.settled",
+        payload: { threadId, settledAt: now, updatedAt: now },
+      });
+      yield* insertRetiredEvent({
+        eventId: "evt-retired-unsettled",
+        streamVersion: 1,
+        eventType: "thread.unsettled",
+        payload: { threadId, reason: "activity", updatedAt: now },
+      });
+
+      const replayed = yield* Stream.runCollect(eventStore.readFromSequence(0, 10)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      );
+      assert.deepEqual(
+        replayed.map((event) => event.type),
+        ["thread.settled", "thread.unsettled"],
+      );
+    }),
+  );
 });

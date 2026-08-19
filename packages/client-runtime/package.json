@@ -135,9 +135,9 @@
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
     },
-    "./state/thread-settled": {
-      "types": "./src/state/threadSettled.ts",
-      "default": "./src/state/threadSettled.ts"
+    "./state/thread-snooze": {
+      "types": "./src/state/threadSnooze.ts",
+      "default": "./src/state/threadSnooze.ts"
     },
     "./state/thread-search": {
       "types": "./src/state/threadSearch.ts",

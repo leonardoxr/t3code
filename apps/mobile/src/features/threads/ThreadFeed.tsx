@@ -794,7 +794,7 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
 
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
-  props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
+  props: Pick<ThreadFeedProps, "environmentId" | "threadId" | "skills"> & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
@@ -1003,6 +1003,9 @@ function renderFeedEntry(
       iconSubtleColor={iconSubtleColor}
       onCopyRow={props.onCopyWorkRow}
       onToggleRow={props.onToggleWorkRow}
+      environmentId={props.environmentId}
+      threadId={props.threadId}
+      onPressImage={props.onPressImage}
     />
   );
 }
@@ -1779,7 +1782,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           return workingRowHeight;
         case "activity-group":
           // Expanded rows append a variable detail block — fall back to
-          // measurement for those groups.
+          // measurement for those groups. Inline images need no such escape
+          // hatch: their frame is a fixed box collapsedWorkLogHeight already
+          // adds, so image rows keep the pre-measured height.
           return entry.activities.some((activity) => expandedWorkRows[activity.id])
             ? undefined
             : collapsedWorkLogHeight(entry.activities, appearance.baseFontSize);
@@ -1794,6 +1799,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     (info: { item: ThreadFeedEntry; index: number }) =>
       renderFeedEntry(info, {
         environmentId: props.environmentId,
+        threadId: props.threadId,
         copiedRowId,
         expandedWorkRows,
         terminalAssistantMessageIds,
@@ -1830,6 +1836,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,
+      props.threadId,
       props.skills,
     ],
   );

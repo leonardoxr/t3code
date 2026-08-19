@@ -89,8 +89,6 @@ describe("orchestration projector", () => {
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
         snoozedUntil: null,
         snoozedAt: null,
         deletedAt: null,
@@ -271,7 +269,7 @@ describe("orchestration projector", () => {
       ),
     );
 
-    const settledAt = "2026-02-23T08:01:00.000Z";
+    const turnEndedAt = "2026-02-23T08:01:00.000Z";
     const [afterRunning, afterReady] = await Effect.runPromise(
       Effect.flatMap(
         projectEvent(
@@ -308,7 +306,7 @@ describe("orchestration projector", () => {
                 type: "thread.session-set",
                 aggregateKind: "thread",
                 aggregateId: "thread-1",
-                occurredAt: settledAt,
+                occurredAt: turnEndedAt,
                 commandId: "cmd-ready",
                 payload: {
                   threadId: "thread-1",
@@ -321,7 +319,7 @@ describe("orchestration projector", () => {
                     runtimeMode: "approval-required",
                     activeTurnId: null,
                     lastError: null,
-                    updatedAt: settledAt,
+                    updatedAt: turnEndedAt,
                   },
                 },
               }),
@@ -335,12 +333,12 @@ describe("orchestration projector", () => {
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
     expect(thread?.session?.status).toBe("running");
 
-    // Leaving the "running" session status settles the running turn with the
+    // Leaving the "running" session status ends the running turn with the
     // session timestamp as the turn end.
-    const settledThread = afterReady.threads[0];
-    expect(settledThread?.latestTurn?.turnId).toBe("turn-1");
-    expect(settledThread?.latestTurn?.state).toBe("completed");
-    expect(settledThread?.latestTurn?.completedAt).toBe(settledAt);
+    const threadAfterTurnEnd = afterReady.threads[0];
+    expect(threadAfterTurnEnd?.latestTurn?.turnId).toBe("turn-1");
+    expect(threadAfterTurnEnd?.latestTurn?.state).toBe("completed");
+    expect(threadAfterTurnEnd?.latestTurn?.completedAt).toBe(turnEndedAt);
   });
 
   it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {

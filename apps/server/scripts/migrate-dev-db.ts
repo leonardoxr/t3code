@@ -8,8 +8,8 @@
  *   1. Nukes `<worktree>/.t3/userdata/state.sqlite`.
  *   2. Snapshots the real db (read-only VACUUM INTO) and prunes it to the
  *      most recently updated projects and, per project, the most recent
- *      threads that have fully stopped. Working, settled, and monitored
- *      threads are skipped so the dev server never adopts live work.
+ *      threads that have fully stopped. Working and monitored threads are
+ *      skipped so the dev server never adopts live work.
  *      Auth sessions, pairing links, command receipts, and provider
  *      runtime rows are dropped — pair a fresh browser against dev.
  *   3. Runs migrations on the result. Because the clone carries the real
@@ -245,17 +245,15 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     : "";
 
   // "Stopped" is the persisted subset of the UI's thread status: the session
-  // reached status 'stopped' and nothing marks the thread settled or
-  // monitored. The in-memory working/monitoring liveness never persists, so
-  // filtering the session status is sufficient.
+  // reached status 'stopped' and nothing marks the thread monitored. The
+  // in-memory working/monitoring liveness never persists, so filtering the
+  // session status is sufficient.
   yield* sql.unsafe(`CREATE TEMP TABLE stopped_threads AS
     SELECT t.thread_id, t.project_id, t.updated_at
     FROM projection_threads t
     JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
     WHERE t.deleted_at IS NULL
       AND t.archived_at IS NULL
-      AND t.settled_at IS NULL
-      AND (t.settled_override IS NULL OR t.settled_override <> 'settled')
       ${monitorFilter}
       AND s.status = 'stopped'`).unprepared;
 

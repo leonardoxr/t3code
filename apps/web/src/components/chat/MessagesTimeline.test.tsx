@@ -125,6 +125,15 @@ vi.mock("@pierre/diffs/react", () => {
   return { FileDiff: MockFileDiff };
 });
 
+// The signed-URL round trip belongs to the asset endpoint's own tests; here we
+// only care that a resolvable image renders and an unresolvable one does not.
+vi.mock("~/assets/assetUrls", () => ({
+  useAssetUrlState: (_environmentId: unknown, resource: { readonly path: string }) =>
+    resource.path.startsWith("/outside-workspace")
+      ? { _tag: "Failure" }
+      : { _tag: "Success", url: `https://assets.test${resource.path}` },
+}));
+
 function matchMedia() {
   return {
     matches: false,
@@ -827,5 +836,58 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
+  });
+
+  it("renders the image an agent viewed inline under its work row", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Image view",
+              tone: "tool",
+              itemType: "image_view",
+              imagePath: "/ws/shots/login.png",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('src="https://assets.test/ws/shots/login.png"');
+    expect(markup).toContain('alt="login.png"');
+    expect(markup).toContain('aria-label="Preview login.png"');
+  });
+
+  it("stays text-only when the image is not servable from the thread workspace", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Image view",
+              tone: "tool",
+              itemType: "image_view",
+              imagePath: "/outside-workspace/shot.png",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Image view");
+    expect(markup).not.toContain("<img");
   });
 });

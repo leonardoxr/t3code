@@ -3,7 +3,7 @@ import {
   resolveSnoozePresets as resolveSharedSnoozePresets,
   snoozeWakeLabel,
   type SnoozePreset,
-} from "@t3tools/client-runtime/state/thread-settled";
+} from "@t3tools/client-runtime/state/thread-snooze";
 
 import { formatShortTimestamp, parseTimestampDate } from "../timestampFormat";
 

@@ -184,6 +184,41 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("serves a canonical image path against a symlinked workspace root", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parent = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-symlink-workspace-",
+      });
+      const realRoot = path.join(parent, "real");
+      const linkedRoot = path.join(parent, "linked");
+      const imagePath = path.join(realRoot, "shot.png");
+      yield* fileSystem.makeDirectory(realRoot, { recursive: true });
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+      yield* fileSystem.symlink(realRoot, linkedRoot);
+      const canonicalImagePath = yield* fileSystem.realPath(imagePath);
+
+      // What an agent reports: the canonical path of the file it read, while
+      // the project still holds the symlinked root the user typed.
+      const result = yield* issueAssetUrl({
+        resource: {
+          _tag: "workspace-file",
+          threadId: ThreadId.make("thread-1"),
+          path: canonicalImagePath,
+        },
+        workspaceRoot: linkedRoot,
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const token = suffix.slice(0, suffix.indexOf("/"));
+
+      expect(yield* resolveAsset(token, "shot.png")).toEqual({
+        kind: "file",
+        path: canonicalImagePath,
+      });
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("issues exact attachment capabilities by attachment id", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

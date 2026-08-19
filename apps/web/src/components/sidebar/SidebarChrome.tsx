@@ -4,12 +4,17 @@ import {
   GitPullRequestIcon,
   SettingsIcon,
 } from "lucide-react";
-import { memo, useCallback } from "react";
+import { memo, useCallback, useMemo } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
+import {
+  SUBSCRIPTION_USAGE_PROVIDER_ORDER,
+  pickBindingWindow,
+} from "@t3tools/shared/subscriptionUsageView";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
+import { useSubscriptionUsage } from "../../state/subscriptionUsage";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
@@ -30,6 +35,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
+import { SubscriptionUsageMeter } from "./SubscriptionUsageMeter";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -134,6 +140,20 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
+  const { providers: quotaProviders } = useSubscriptionUsage();
+  // The rings replace the usage icon only once they have a figure to show, so a
+  // machine with nothing signed in still has a way to reach the page. A reported
+  // provider whose every bucket was unprovisioned has no binding window, and an
+  // empty ring would read as "0% spent" rather than "nothing to report".
+  const quotaMeters = useMemo(
+    () =>
+      SUBSCRIPTION_USAGE_PROVIDER_ORDER.flatMap((provider) => {
+        const reported = quotaProviders.find((candidate) => candidate.provider === provider);
+        if (reported === undefined || reported.status !== "ok") return [];
+        return pickBindingWindow(reported.windows) === null ? [] : [reported];
+      }),
+    [quotaProviders],
+  );
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -208,18 +228,28 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
                 </Tooltip>
               </SidebarMenuItem>
             ) : null}
-            <SidebarMenuItem className="shrink-0">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <SidebarMenuButton aria-label="Usage" onClick={handleUsageClick} size="icon">
-                      <ChartNoAxesColumnIcon />
-                    </SidebarMenuButton>
-                  }
+            {quotaMeters.length === 0 ? (
+              <SidebarMenuItem className="shrink-0">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <SidebarMenuButton aria-label="Usage" onClick={handleUsageClick} size="icon">
+                        <ChartNoAxesColumnIcon />
+                      </SidebarMenuButton>
+                    }
+                  />
+                  <TooltipPopup side="top">Usage</TooltipPopup>
+                </Tooltip>
+              </SidebarMenuItem>
+            ) : (
+              quotaMeters.map((reported) => (
+                <SubscriptionUsageMeter
+                  key={reported.provider}
+                  provider={reported}
+                  onClick={handleUsageClick}
                 />
-                <TooltipPopup side="top">Usage</TooltipPopup>
-              </Tooltip>
-            </SidebarMenuItem>
+              ))
+            )}
           </>
         )}
         <SidebarUpdatePill />

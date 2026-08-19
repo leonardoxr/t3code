@@ -107,6 +107,7 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as SubscriptionUsageService from "./subscriptionUsage/SubscriptionUsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
@@ -437,6 +438,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
+      const subscriptionUsage = yield* SubscriptionUsageService.SubscriptionUsageService;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -1064,23 +1066,16 @@ const makeWsRpcLayer = (
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
               const normalizedCommand = yield* normalizeDispatchCommand(command);
-              // Archive and settle both mean "done with this thread", so a
-              // live provider session must not keep running background work
-              // (PR monitors, dev servers, subagent fleets) after either
-              // lands. The decider rejects settling a starting/running
-              // session, so for settle this only ever stops an idle one; a
-              // stopped session-set does not count as activity, so the stop
-              // cannot un-settle the thread it follows.
-              const parkingCommand =
-                normalizedCommand.type === "thread.archive" ||
-                normalizedCommand.type === "thread.settle"
-                  ? normalizedCommand
-                  : undefined;
-              // Best-effort on purpose: the user's archive/settle must not
-              // fail because this cleanup read blipped, so a failed read
-              // logs and skips the stop instead of propagating.
-              const shouldStopSessionAfterCommand = parkingCommand
-                ? yield* projectionSnapshotQuery.getThreadShellById(parkingCommand.threadId).pipe(
+              // Archiving means "done with this thread", so a live provider
+              // session must not keep running background work (PR monitors,
+              // dev servers, subagent fleets) after it lands.
+              const archiveCommand =
+                normalizedCommand.type === "thread.archive" ? normalizedCommand : undefined;
+              // Best-effort on purpose: the user's archive must not fail
+              // because this cleanup read blipped, so a failed read logs and
+              // skips the stop instead of propagating.
+              const shouldStopSessionAfterCommand = archiveCommand
+                ? yield* projectionSnapshotQuery.getThreadShellById(archiveCommand.threadId).pipe(
                     Effect.map(
                       Option.match({
                         onNone: () => false,
@@ -1091,56 +1086,45 @@ const makeWsRpcLayer = (
                     Effect.catchCause((cause) =>
                       Effect.logWarning(
                         "failed to read thread session state before session-stop check",
-                        { threadId: parkingCommand.threadId, cause },
+                        { threadId: archiveCommand.threadId, cause },
                       ).pipe(Effect.as(false)),
                     ),
                   )
                 : false;
               const result = yield* dispatchNormalizedCommand(normalizedCommand);
-              if (parkingCommand) {
-                const parkingKind = parkingCommand.type === "thread.archive" ? "archive" : "settle";
+              if (archiveCommand) {
                 if (shouldStopSessionAfterCommand) {
                   yield* Effect.gen(function* () {
                     const stopCommand = yield* normalizeDispatchCommand({
                       type: "thread.session.stop",
                       commandId: CommandId.make(
-                        `session-stop-for-${parkingKind}:${parkingCommand.commandId}`,
+                        `session-stop-for-archive:${archiveCommand.commandId}`,
                       ),
-                      threadId: parkingCommand.threadId,
+                      threadId: archiveCommand.threadId,
                       createdAt: yield* nowIso,
-                      // A settled thread can be re-engaged before this stop is
-                      // decided; the decider then drops the stop instead of
-                      // killing the new session. Archive stops stay
-                      // unconditional: turn starts on archived threads are
-                      // rejected, so there is no new session to protect.
-                      ...(parkingKind === "settle" ? { onlyIfSettled: true } : {}),
                     });
 
                     yield* dispatchNormalizedCommand(stopCommand);
                   }).pipe(
                     Effect.catchCause((cause) =>
-                      Effect.logWarning(`failed to stop provider session during ${parkingKind}`, {
-                        threadId: parkingCommand.threadId,
+                      Effect.logWarning("failed to stop provider session during archive", {
+                        threadId: archiveCommand.threadId,
                         cause,
                       }),
                     ),
                   );
                 }
 
-                // Terminals are user-opened panes, not thread background
-                // work: archive removes the thread from view so they close
-                // with it, but a settled thread stays reachable and may be
-                // un-settled, so its terminals stay up.
-                if (parkingCommand.type === "thread.archive") {
-                  yield* terminalManager.close({ threadId: parkingCommand.threadId }).pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning("failed to close thread terminals after archive", {
-                        threadId: parkingCommand.threadId,
-                        error: error.message,
-                      }),
-                    ),
-                  );
-                }
+                // Terminals are user-opened panes, not thread background work:
+                // archive removes the thread from view, so they close with it.
+                yield* terminalManager.close({ threadId: archiveCommand.threadId }).pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning("failed to close thread terminals after archive", {
+                      threadId: archiveCommand.threadId,
+                      error: error.message,
+                    }),
+                  ),
+                );
               }
               return result;
             }).pipe(
@@ -1591,6 +1575,10 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverGetSubscriptionUsage]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverGetSubscriptionUsage, subscriptionUsage.read(), {
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) =>
