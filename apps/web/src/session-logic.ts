@@ -639,6 +639,31 @@ export function deriveActivePlanState(
   return planStateFromActivity(latest);
 }
 
+/**
+ * Reset instant of the newest rate-limit window that has not elapsed yet, or
+ * null. A provider that is waiting out a rate limit streams nothing, so this is
+ * the only thing that separates "backing off until 05:24" from "thinking".
+ */
+export function deriveRateLimitResetsAt(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  nowMs: number,
+): string | null {
+  const latest = Arr.findLast(
+    [...activities].toSorted(compareActivitiesByOrder),
+    (activity) => activity.kind === "turn.rate-limited",
+  ).pipe(Option.getOrNull);
+  const payload = latest?.payload;
+  if (!payload || typeof payload !== "object" || !("resetsAt" in payload)) {
+    return null;
+  }
+  const resetsAt = payload.resetsAt;
+  if (typeof resetsAt !== "string") {
+    return null;
+  }
+  const resetsAtMs = Date.parse(resetsAt);
+  return Number.isNaN(resetsAtMs) || resetsAtMs <= nowMs ? null : resetsAt;
+}
+
 export interface TurnPlanEntry {
   /** Stable per-turn row id (plans rewrite constantly; the row must not churn). */
   id: string;

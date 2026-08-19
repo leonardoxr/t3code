@@ -6,6 +6,7 @@ import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -29,8 +30,10 @@ import { ServerConfig } from "../../config.ts";
 import type { AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
 import {
   enrichOmpToolCallFiles,
+  formatOmpRateLimitTurnError,
   makeOmpAdapter,
   ompPromptSettlementBelongsToContext,
+  parseOmpRateLimitNotice,
   parseOmpTaskToolCall,
   parseOmpTaskToolProgress,
   parseOmpTaskToolResults,
@@ -129,6 +132,51 @@ it("requires a settlement to match the live Oh My Pi turn", () => {
       turnId: staleTurnId,
     }),
   );
+});
+
+const RATE_LIMIT_NOTICE =
+  '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."},"request_id":"req_011CeBMhQkPKvK4okSKtsEEL"} retry-after-ms=4300000';
+
+it("reads the retry window out of an omp rate-limit report", () => {
+  const notice = parseOmpRateLimitNotice(RATE_LIMIT_NOTICE);
+  assert.isDefined(notice);
+  if (!notice) {
+    return;
+  }
+
+  assert.equal(notice.retryAfterMs, 4_300_000);
+  assert.equal(notice.requestId, "req_011CeBMhQkPKvK4okSKtsEEL");
+  assert.include(notice.providerMessage ?? "", "would exceed your account's rate limit");
+  assert.include(
+    formatOmpRateLimitTurnError(notice, "2026-08-19T05:22:33.000Z"),
+    "Retry after 2026-08-19T05:22:33.000Z (about 72 min).",
+  );
+});
+
+it("treats a rate limit reported without a retry window as an open-ended wait", () => {
+  const notice = parseOmpRateLimitNotice(
+    '429 {"type":"error","error":{"type":"rate_limit_error","message":"Slow down."}}',
+  );
+  assert.isDefined(notice);
+  if (!notice) {
+    return;
+  }
+
+  assert.isUndefined(notice.retryAfterMs);
+  assert.equal(
+    formatOmpRateLimitTurnError(notice, undefined),
+    "Rate limited by the model provider. Slow down.",
+  );
+});
+
+it("does not read a rate-limit report out of an agent discussing one", () => {
+  // The agent quoting a 429 while explaining rate limits is prose, not a
+  // failure: only a message that IS the raw report may fail the turn.
+  assert.isUndefined(
+    parseOmpRateLimitNotice(`Here is what the provider returned:\n\n${RATE_LIMIT_NOTICE}\n`),
+  );
+  assert.isUndefined(parseOmpRateLimitNotice("429s are rate_limit_error responses."));
+  assert.isUndefined(parseOmpRateLimitNotice(RATE_LIMIT_NOTICE.replace("rate_limit_error", "x")));
 });
 
 it("resolves the requested Oh My Pi session mode from interaction mode", () => {
@@ -1406,6 +1454,109 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
       // Live clock so the timeouts above are real: under the default test clock
       // they wait on virtual time that never advances, and a regression would
       // hang until the suite timeout instead of failing here.
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("settles an omp rate-limit report as a failed turn carrying its reset instant", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("omp-rate-limited");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockOmpWrapper({
+          // Exactly what omp prints when the upstream provider answers 429: the
+          // raw error as the whole assistant message, then a normal end_turn.
+          T3_ACP_PROMPT_RESPONSE_TEXT:
+            '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."},"request_id":"req_011CeBMhQkPKvK4okSKtsEEL"} retry-after-ms=4300000',
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const sentAtMs = yield* Clock.currentTimeMillis;
+      yield* adapter.sendTurn({ threadId, input: "keep going", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      const completed = runtimeEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed",
+      );
+
+      assert.equal(completed?.payload.state, "failed");
+      assert.include(completed?.payload.errorMessage ?? "", "Rate limited by the model provider");
+      assert.include(completed?.payload.errorMessage ?? "", "about 72 min");
+      const resetsAtMs = Date.parse(completed?.payload.rateLimitResetsAt ?? "");
+      assert.isFalse(Number.isNaN(resetsAtMs), "rateLimitResetsAt must be an ISO instant");
+      assert.isAbove(resetsAtMs, sentAtMs);
+      // The notice text still reaches the timeline: the raw upstream error is
+      // the evidence, the failed turn is the classification.
+      const delta = runtimeEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "content.delta" }> =>
+          event.type === "content.delta",
+      );
+      assert.include(delta?.payload.delta ?? "", "rate_limit_error");
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("keeps a normal turn completed when no rate-limit report was streamed", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("omp-not-rate-limited");
+      const wrapperPath = yield* Effect.promise(() => makeMockOmpWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello omp", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      const completed = runtimeEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed",
+      );
+
+      assert.equal(completed?.payload.state, "completed");
+      assert.isUndefined(completed?.payload.rateLimitResetsAt);
+
+      yield* adapter.stopSession(threadId);
     }).pipe(TestClock.withLive),
   );
 });

@@ -502,6 +502,34 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "turn.completed": {
+      // A rate-limited turn gets its own row so the wait is legible in the work
+      // log and clients can label a later spinning turn with the reset instant
+      // (the provider stays silent while it backs off).
+      if (event.payload.rateLimitResetsAt === undefined) {
+        break;
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "error",
+          kind: "turn.rate-limited",
+          summary: event.payload.errorMessage
+            ? truncateDetail(event.payload.errorMessage, 120)
+            : "Rate limited by the model provider",
+          payload: {
+            resetsAt: event.payload.rateLimitResetsAt,
+            ...(event.payload.errorMessage !== undefined
+              ? { message: truncateDetail(event.payload.errorMessage) }
+              : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "user-input.requested": {
       return [
         {
