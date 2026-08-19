@@ -171,6 +171,12 @@ export const ServerProvider = Schema.Struct({
   continuation: Schema.optional(ServerProviderContinuation),
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
+  // How the driver handles a prompt sent while a turn is running. "native"
+  // (or absent, for older servers) folds it into the running turn; "queued"
+  // means the transport cannot steer — the message waits for the turn to end
+  // — so clients must route mid-turn sends to the follow-up queue instead of
+  // claiming immediate delivery.
+  midTurnSteering: Schema.optional(Schema.Literals(["native", "queued"])),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),

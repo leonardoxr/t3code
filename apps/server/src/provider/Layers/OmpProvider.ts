@@ -50,6 +50,11 @@ const OMP_PRESENTATION = {
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
   requiresNewThreadForModelChange: false,
+  // omp over ACP cannot steer: a concurrent session/prompt implicitly
+  // CANCELS the running turn (acp-agent prompt()), and T3's prompt
+  // serialization otherwise holds the message until the turn ends while the
+  // timeline claims delivery. Clients must queue mid-turn sends instead.
+  midTurnSteering: "queued",
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
