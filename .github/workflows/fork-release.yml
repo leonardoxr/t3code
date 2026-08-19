@@ -1,0 +1,196 @@
+# Fork release — personal distribution of this fork (leonardoxr/t3code).
+#
+# Publishes UNSIGNED desktop builds (macOS arm64 + Windows x64) to this
+# repository's GitHub Releases. The electron-updater feed repository is baked
+# from `github.repository` at build time, so installed fork apps poll THIS
+# repo's releases for the in-app update pill — never upstream.
+#
+# Deliberately dropped from the upstream release pipeline: code signing /
+# notarization (single-user builds), npm `t3` publish (upstream-owned name),
+# relay deploy read-back (the committed .env.example carries the public
+# T3 Connect identifiers), Linux/AppImage + AUR, Vercel hosted web, the
+# version-bump commit, and Discord announcements. The desktop artifact
+# bundles this fork's server + web client, so a desktop-only release ships
+# everything.
+#
+# Ritual: pick a version in the fork range (0.100.x — disjoint from upstream
+# 0.0.x so npm `t3@<version>` never resolves), then either push a tag
+# `v0.100.N` or run this workflow manually with the version input.
+#
+# The upstream `Release` workflow must stay disabled in this repository
+# (`gh workflow disable Release`) so `v*.*.*` tags only trigger this one.
+#
+# Known tradeoffs of the unsigned personal build:
+# - macOS: Gatekeeper quarantine on first install (right-click → Open, or
+#   `xattr -dr com.apple.quarantine "/Applications/T3 Code (Alpha).app"`);
+#   Clerk passkeys unavailable (needs signed Associated Domains) — sign in
+#   to T3 Connect with another factor.
+# - Windows: SmartScreen warning on first run; no `--wsl-prebuild`, so the
+#   WSL backend compiles node-pty on first use instead of shipping it.
+name: Fork Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example 0.100.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Resolve release version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release version: $version (expected plain semver; prerelease" >&2
+            echo "suffixes are rejected by the updater's latest channel)." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-15
+            platform: mac
+            target: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+          - label: Windows x64
+            runner: windows-2025
+            platform: win
+            target: nsis
+            arch: x64
+            rust_target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/desktop...
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # The committed .env.example carries the PUBLIC T3 Connect identifiers
+      # (relay URL, Clerk publishable key, CLI OAuth client id) that official
+      # releases bake in via CI env. Copying it in keeps `t3 connect` working
+      # in fork builds against the upstream relay.
+      - name: Bake T3 Connect public config
+        shell: bash
+        run: cp .env.example .env
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.version.outputs.version }}"
+
+      - name: Build desktop artifact (unsigned)
+        shell: bash
+        env:
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          vp run dist:desktop:artifact \
+            --platform "${{ matrix.platform }}" \
+            --target "${{ matrix.target }}" \
+            --arch "${{ matrix.arch }}" \
+            --build-version "${{ needs.version.outputs.version }}" \
+            --verbose
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          shopt -s nullglob
+          for pattern in \
+            "release/*.dmg" \
+            "release/*.zip" \
+            "release/*.exe" \
+            "release/*.blockmap" \
+            "release/*.yml"; do
+            for file in $pattern; do
+              cp "$file" release-publish/
+            done
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-publish/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download all desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: T3 Code (Fork) ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/*.exe
+            release-assets/*.blockmap
+            release-assets/*.yml
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
