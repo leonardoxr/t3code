@@ -94,6 +94,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { imagePathFromToolInput } from "../toolImagePath.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -748,6 +749,16 @@ function isReadOnlyToolName(toolName: string): boolean {
     normalized.includes("glob") ||
     normalized.includes("search")
   );
+}
+
+/**
+ * The image a tool call read, if it read one. Gated on read-only tools: a
+ * `Write` or `Edit` targeting an SVG carries the same `file_path`, and an
+ * agent rewriting a directory of icons must not splash them across the
+ * timeline.
+ */
+function toolCallImagePath(toolName: string, input: Record<string, unknown>): string | undefined {
+  return isReadOnlyToolName(toolName) ? imagePathFromToolInput(input) : undefined;
 }
 
 function classifyRequestType(toolName: string): CanonicalRequestType {
@@ -2304,6 +2315,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     for (const [index, tool] of context.inFlightTools.entries()) {
+      const imagePath = toolCallImagePath(tool.toolName, tool.input);
       const toolStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "item.completed",
@@ -2318,6 +2330,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: status === "completed" ? "completed" : "failed",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(imagePath ? { imagePath } : {}),
           data: {
             toolName: tool.toolName,
             input: tool.input,
@@ -2533,6 +2546,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         };
         context.inFlightTools.set(event.index, nextTool);
 
+        const imagePath = toolCallImagePath(nextTool.toolName, nextTool.input);
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
           type: "item.updated",
@@ -2551,6 +2565,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: nextTool.title,
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
+            ...(imagePath ? { imagePath } : {}),
             ...(nextTool.agentId ? { agentId: nextTool.agentId } : {}),
             ...(nextTool.parentToolUseId ? { parentToolUseId: nextTool.parentToolUseId } : {}),
             data: {
@@ -2644,6 +2659,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.inFlightTools.set(index, tool);
 
+      // Re-derived at every emission because the tool input streams in: a
+      // `content_block_start` often carries an empty input and the real
+      // `file_path` only lands through `input_json_delta`.
+      const imagePath = toolCallImagePath(toolName, toolInput);
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "item.started",
@@ -2658,6 +2677,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(imagePath ? { imagePath } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
           data: {
@@ -2724,6 +2744,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         result: toolResult.block,
       };
 
+      const imagePath = toolCallImagePath(tool.toolName, tool.input);
       const updatedStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
         type: "item.updated",
@@ -2738,6 +2759,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: toolResult.isError ? "failed" : "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(imagePath ? { imagePath } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
           data: toolData,
@@ -2792,6 +2814,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: itemStatus,
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(imagePath ? { imagePath } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
           data: toolData,

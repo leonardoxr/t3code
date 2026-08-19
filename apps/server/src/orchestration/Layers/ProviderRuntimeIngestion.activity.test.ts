@@ -142,3 +142,27 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(payload.data).toEqual(streamingData);
   });
 });
+
+describe("runtimeEventToActivities viewed images", () => {
+  it("keeps the viewed image path on every tool lifecycle activity", () => {
+    const lifecycles = ["item.started", "item.updated", "item.completed"] as const;
+
+    for (const type of lifecycles) {
+      const activities = runtimeEventToActivities({
+        ...base,
+        type,
+        eventId: EventId.make(`evt-${type}`),
+        payload: {
+          itemType: "image_view",
+          title: "Image view",
+          imagePath: "/ws/shot.png",
+        },
+      } satisfies ProviderRuntimeEvent);
+
+      expect(activities).toHaveLength(1);
+      // Top-level payload fields survive projectActivityPayload untouched,
+      // which is how the path reaches the client without the bytes.
+      expect(activities[0]?.payload).toMatchObject({ imagePath: "/ws/shot.png" });
+    }
+  });
+});

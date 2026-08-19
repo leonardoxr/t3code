@@ -13,6 +13,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
 import type {
   ChatMessage,
@@ -81,6 +82,11 @@ export interface WorkLogEntry {
   toolData?: unknown;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  /**
+   * Absolute path of an image the agent viewed on this tool call. The row
+   * renders it inline via a signed workspace-file asset URL.
+   */
+  imagePath?: string;
   /** From runtime item / task payload `status` when present (e.g. tool.updated). */
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
@@ -805,6 +811,20 @@ function extractWorkLogToolLifecycleStatus(
   return undefined;
 }
 
+/**
+ * Adapters set `imagePath` when a tool call looked at an image. The extension
+ * check mirrors the asset endpoint, which only signs previewable images — a
+ * path it would reject must not turn into a broken inline `<img>`.
+ */
+function extractWorkLogImagePath(payload: Record<string, unknown> | null): string | undefined {
+  const imagePath = payload?.imagePath;
+  if (typeof imagePath !== "string") {
+    return undefined;
+  }
+  const trimmed = imagePath.trim();
+  return trimmed.length > 0 && isWorkspaceImagePreviewPath(trimmed) ? trimmed : undefined;
+}
+
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
@@ -879,6 +899,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (requestKind) {
     entry.requestKind = requestKind;
+  }
+  const imagePath = extractWorkLogImagePath(payload);
+  if (imagePath) {
+    entry.imagePath = imagePath;
   }
   if (toolCallId) {
     entry.toolCallId = toolCallId;
@@ -1045,6 +1069,7 @@ function mergeDerivedWorkLogEntries(
   const toolTitle = next.toolTitle ?? previous.toolTitle;
   const itemType = next.itemType ?? previous.itemType;
   const requestKind = next.requestKind ?? previous.requestKind;
+  const imagePath = next.imagePath ?? previous.imagePath;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
@@ -1059,6 +1084,7 @@ function mergeDerivedWorkLogEntries(
     ...(toolTitle ? { toolTitle } : {}),
     ...(itemType ? { itemType } : {}),
     ...(requestKind ? { requestKind } : {}),
+    ...(imagePath ? { imagePath } : {}),
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),

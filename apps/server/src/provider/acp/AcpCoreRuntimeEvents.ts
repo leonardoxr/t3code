@@ -12,6 +12,9 @@ import {
   type ToolLifecycleItemType,
   type TurnId,
 } from "@t3tools/contracts";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+
+import { imagePathFromToolInput } from "../toolImagePath.ts";
 
 import type { AcpPermissionRequest, AcpPlanUpdate, AcpToolCallState } from "./AcpRuntimeModel.ts";
 
@@ -158,6 +161,39 @@ export function makeAcpPlanUpdatedEvent(input: {
   };
 }
 
+/**
+ * The image an ACP tool call read, if it read one. Agents advertise the target
+ * in one of two places: `locations` is the protocol's own "follow-along" list
+ * of `{path, line?}` entries, while `rawInput` is the agent's un-normalized
+ * tool input. Prefer the protocol field, fall back to the agent shape. `data`
+ * is untyped passthrough, so validate defensively.
+ *
+ * Restricted to the `read` kind: `locations` also carries edit and write
+ * targets, and an agent rewriting a directory of SVGs must not splash them
+ * across the timeline.
+ */
+function imagePathFromAcpToolCall(toolCall: AcpToolCallState): string | undefined {
+  if (toolCall.kind !== "read") {
+    return undefined;
+  }
+  const data = toolCall.data;
+  const locations: ReadonlyArray<unknown> = Array.isArray(data.locations) ? data.locations : [];
+  for (const location of locations) {
+    if (location === null || typeof location !== "object" || !("path" in location)) {
+      continue;
+    }
+    const path = location.path;
+    if (typeof path !== "string") {
+      continue;
+    }
+    const trimmed = path.trim();
+    if (trimmed.length > 0 && isWorkspaceImagePreviewPath(trimmed)) {
+      return trimmed;
+    }
+  }
+  return imagePathFromToolInput(data.rawInput);
+}
+
 export function makeAcpToolCallEvent(input: {
   readonly stamp: AcpEventStamp;
   readonly provider: ProviderDriverKind;
@@ -167,6 +203,7 @@ export function makeAcpToolCallEvent(input: {
   readonly rawPayload: unknown;
 }): ProviderRuntimeEvent {
   const runtimeStatus = runtimeItemStatusFromAcpToolStatus(input.toolCall.status);
+  const imagePath = imagePathFromAcpToolCall(input.toolCall);
   return {
     type:
       input.toolCall.status === "completed" || input.toolCall.status === "failed"
@@ -183,6 +220,7 @@ export function makeAcpToolCallEvent(input: {
       ...(input.toolCall.title ? { title: input.toolCall.title } : {}),
       ...(input.toolCall.detail ? { detail: input.toolCall.detail } : {}),
       ...(Object.keys(input.toolCall.data).length > 0 ? { data: input.toolCall.data } : {}),
+      ...(imagePath ? { imagePath } : {}),
     },
     raw: {
       source: "acp.jsonrpc",

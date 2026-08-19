@@ -1,6 +1,8 @@
 import * as Haptics from "expo-haptics";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
-import { LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+import { Image, LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+import { TouchableOpacity } from "react-native-gesture-handler";
 
 import { AppText as Text } from "../../components/AppText";
 import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
@@ -8,6 +10,8 @@ import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { basename } from "../files/filePath";
+import { useAssetUrl } from "../../state/assets";
 import Animated, { FadeIn } from "react-native-reanimated";
 
 const WORK_LOG_LAYOUT_ANIMATION = {
@@ -98,6 +102,14 @@ const WORK_ROW_HEIGHT = 32; // min-h-8
 const WORK_ROW_GAP = 1; // gap-px
 const WORK_LOG_HEADER_PADDING = 2; // pb-0.5 under the "work log" label
 const WORK_LOG_BOTTOM_MARGIN = 4; // mb-1
+// An inline image adds a fixed box under its row. The frame is sized in
+// advance and rendered even before the signed URL resolves (see
+// WorkRowInlineImage), so an image row's height is just as deterministic as a
+// plain one — image groups therefore stay on getFixedItemSize's fast path
+// instead of taking the expanded-row fallback to measurement, which is what
+// keeps scrolling up past screenshots from jumping.
+const WORK_ROW_IMAGE_HEIGHT = 160;
+const WORK_ROW_IMAGE_MARGIN = 4; // mt-1
 
 export const WORK_GROUP_TOGGLE_HEIGHT = 36; // min-h-8 (32) + mb-1 (4)
 
@@ -115,8 +127,55 @@ export function collapsedWorkLogHeight(
   return (
     WORK_LOG_BOTTOM_MARGIN +
     (onlyToolRows ? 0 : headerHeight) +
-    rows.length * WORK_ROW_HEIGHT +
+    rows.reduce(
+      (total, row) =>
+        total +
+        WORK_ROW_HEIGHT +
+        (row.imagePath ? WORK_ROW_IMAGE_MARGIN + WORK_ROW_IMAGE_HEIGHT : 0),
+      0,
+    ) +
     (rows.length - 1) * WORK_ROW_GAP
+  );
+}
+
+/**
+ * Renders the image an agent looked at, inline under its work row. The bytes
+ * arrive over a signed workspace-file asset URL instead of the socket, so the
+ * path has to resolve inside the thread's workspace — anything else (an image
+ * outside the root, a file since deleted) leaves the frame empty and the row
+ * reads as text only. The frame's height is fixed at WORK_ROW_IMAGE_HEIGHT and
+ * is painted before the URL resolves, so nothing reflows once it does.
+ */
+function WorkRowInlineImage(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly imagePath: string;
+  readonly onPressImage: (uri: string) => void;
+}) {
+  const uri = useAssetUrl(props.environmentId, {
+    _tag: "workspace-file",
+    threadId: props.threadId,
+    path: props.imagePath,
+  });
+  const name = basename(props.imagePath);
+
+  return (
+    <View
+      className="ml-7 mt-1 overflow-hidden rounded-lg border border-neutral-300/60 bg-neutral-100 dark:border-white/[0.12] dark:bg-white/[0.04]"
+      style={{ height: WORK_ROW_IMAGE_HEIGHT }}
+    >
+      {uri === null ? null : (
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel={`Preview ${name}`}
+          activeOpacity={0.7}
+          style={{ flex: 1 }}
+          onPress={() => props.onPressImage(uri)}
+        >
+          <Image source={{ uri }} style={{ flex: 1, width: "100%" }} resizeMode="contain" />
+        </TouchableOpacity>
+      )}
+    </View>
   );
 }
 
@@ -127,6 +186,9 @@ export function ThreadWorkLog(props: {
   readonly iconSubtleColor: import("react-native").ColorValue;
   readonly onCopyRow: (rowId: string, value: string) => void;
   readonly onToggleRow: (rowId: string) => void;
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly onPressImage: (uri: string) => void;
 }) {
   const pressedBackground = useThemeColor("--color-subtle");
   const rows = visibleWorkLogActivities(props.activities).map((activity) => ({
@@ -247,6 +309,15 @@ export function ThreadWorkLog(props: {
                   </View>
                 </View>
               </Pressable>
+
+              {row.imagePath ? (
+                <WorkRowInlineImage
+                  environmentId={props.environmentId}
+                  threadId={props.threadId}
+                  imagePath={row.imagePath}
+                  onPressImage={props.onPressImage}
+                />
+              ) : null}
 
               {fullDetail ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
