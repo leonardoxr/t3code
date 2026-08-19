@@ -157,8 +157,8 @@ interface OmpSessionContext {
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
   /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
+   * >0 means a turn is actively running, so a new sendTurn stops it first
+   * (omp cannot steer), and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
   /**
@@ -1840,28 +1840,46 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
 
     const sendTurn: OmpAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
+        // omp over ACP has no steering surface: a concurrent session/prompt
+        // makes the agent cancel the running turn anyway (acp-agent prompt()),
+        // and T3's prompt serialization would otherwise hold this message
+        // invisibly behind the running prompt — for minutes — while the
+        // timeline claims delivery. Stop the run first so the message reaches
+        // the agent now, as its own turn. Callers that must not destroy
+        // in-flight work queue instead; the provider snapshot advertises that
+        // with `midTurnSteering: "queued"`.
+        if ((sessions.get(input.threadId)?.promptsInFlight ?? 0) > 0) {
+          yield* interruptTurn(input.threadId);
+        }
         const prepared = yield* withThreadLock(
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
-            // A sendTurn while a prompt is in flight is a steer: the agent
-            // folds the new prompt into the ongoing work, so the active turn
-            // id is reused instead of opening a new turn.
-            const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
-            const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+            // The stop above settles every prompt slot. Anything still in
+            // flight means it could not (session churn mid-stop), and sending
+            // now would queue behind that prompt instead of reaching the
+            // agent — the exact silent hold this path exists to prevent.
+            if (ctx.promptsInFlight > 0) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "Oh My Pi is still finishing the previous turn.",
+              });
+            }
+            const turnId = TurnId.make(yield* randomUUIDv4);
             // Count this prompt immediately so a superseded in-flight prompt
             // resolving from here on does not settle the turn; decremented on
             // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
-            // Every prompt (new turn or steer) resets the silence baseline:
-            // the provider legitimately owes nothing until it starts working.
+            // A prompt resets the silence baseline: the provider legitimately
+            // owes nothing until it starts working.
             ctx.turnStartedAtMillis = yield* Clock.currentTimeMillis;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
             ctx.session = {
               ...ctx.session,
-              status: steeringTurnId === undefined ? "connecting" : "running",
+              status: "connecting",
               activeTurnId: turnId,
               updatedAt: yield* nowIso,
             };
@@ -1951,18 +1969,16 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                   detail: "Oh My Pi prompt was interrupted during preparation.",
                 });
               }
-              if (steeringTurnId === undefined) {
-                ctx.lastPlanFingerprint = undefined;
-                // A fresh turn must not inherit a stale thought segment from
-                // an interrupted predecessor.
-                ctx.reasoningItemId = undefined;
-                ctx.reasoningText = "";
-                // Task bookkeeping is per-turn: a fresh turn's task tool calls
-                // get new ids, and stale entries would only leak.
-                ctx.taskToolSubtasks.clear();
-                ctx.taskProgressFingerprints.clear();
-                ctx.completedTaskIds.clear();
-              }
+              ctx.lastPlanFingerprint = undefined;
+              // A fresh turn must not inherit a stale thought segment from
+              // an interrupted predecessor.
+              ctx.reasoningItemId = undefined;
+              ctx.reasoningText = "";
+              // Task bookkeeping is per-turn: a fresh turn's task tool calls
+              // get new ids, and stale entries would only leak.
+              ctx.taskToolSubtasks.clear();
+              ctx.taskProgressFingerprints.clear();
+              ctx.completedTaskIds.clear();
               ctx.session = {
                 ...ctx.session,
                 status: "running",
@@ -1971,16 +1987,14 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 ...(displayModel ? { model: displayModel } : {}),
               };
 
-              if (steeringTurnId === undefined) {
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: displayModel ? { model: displayModel } : {},
-                });
-              }
+              yield* offerRuntimeEvent({
+                type: "turn.started",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: displayModel ? { model: displayModel } : {},
+              });
 
               return {
                 acp: ctx.acp,
@@ -2097,9 +2111,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               const remainingPrompts = Math.max(0, ctx.promptsInFlight - 1);
               ctx.promptsInFlight = remainingPrompts;
 
-              // Only the last remaining prompt settles the turn. A steer-
-              // superseded prompt resolving while another is in flight or
-              // pending must leave the merged turn running.
+              // Only the last remaining prompt settles the turn: a prompt
+              // superseded by a stop-and-send resolving while the replacement
+              // is in flight must not close the turn that replaced it.
               if (
                 remainingPrompts === 0 &&
                 ctx.activeTurnId === prepared.turnId &&

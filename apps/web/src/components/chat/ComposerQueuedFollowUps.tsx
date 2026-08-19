@@ -22,6 +22,9 @@ interface ComposerQueuedFollowUpsProps {
   followUps: ReadonlyArray<OrchestrationQueuedFollowUp>;
   /** A turn is in flight, so "send now" means steering it. */
   isRunning: boolean;
+  /** The provider cannot fold a message into a running turn, so sending a
+   * queued follow-up now stops the run and answers it as the next turn. */
+  sendNowStopsRun: boolean;
   onEdit: (followUpId: QueuedFollowUpId, text: string) => void;
   onRemove: (followUpId: QueuedFollowUpId) => void;
   onReorder: (followUpId: QueuedFollowUpId, orderKey: string) => void;
@@ -75,6 +78,7 @@ function SortableFollowUpRow(props: { id: string; failed: boolean; children: Rea
 export const ComposerQueuedFollowUps = memo(function ComposerQueuedFollowUps({
   followUps,
   isRunning,
+  sendNowStopsRun,
   onEdit,
   onRemove,
   onReorder,
@@ -225,7 +229,13 @@ export const ComposerQueuedFollowUps = memo(function ComposerQueuedFollowUps({
                         variant="ghost"
                         size="icon-xs"
                         className="shrink-0"
-                        aria-label={isRunning ? "Steer with this follow-up now" : "Send now"}
+                        aria-label={
+                          !isRunning
+                            ? "Send now"
+                            : sendNowStopsRun
+                              ? "Stop the run and send this now"
+                              : "Steer with this follow-up now"
+                        }
                         onClick={() => onPromote(followUp.id)}
                       >
                         <CornerDownLeft />
@@ -233,7 +243,11 @@ export const ComposerQueuedFollowUps = memo(function ComposerQueuedFollowUps({
                     }
                   />
                   <TooltipPopup side="top">
-                    {isRunning ? "Steer the running turn with this" : "Send now"}
+                    {!isRunning
+                      ? "Send now"
+                      : sendNowStopsRun
+                        ? "Stop the run and answer this next"
+                        : "Steer the running turn with this"}
                   </TooltipPopup>
                 </Tooltip>
                 <Button

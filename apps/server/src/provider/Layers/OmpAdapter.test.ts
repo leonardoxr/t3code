@@ -1097,6 +1097,93 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("stops the running turn for a mid-turn prompt instead of trailing behind it", () =>
+    Effect.gen(function* () {
+      // omp over ACP cannot steer, and T3 serializes prompts: without stopping
+      // the run first, this second prompt would sit behind the hanging one —
+      // invisible to the agent — while the timeline claimed delivery.
+      const threadId = ThreadId.make("omp-mid-turn-send-stops-the-run");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "omp-acp-mid-turn-send-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockOmpWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const firstTurnStarted = yield* Deferred.make<TurnId>();
+      const twoTurnsCompleted = yield* Deferred.make<void>();
+      const completedCountRef = yield* Ref.make(0);
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+            return;
+          }
+          if (event.type !== "turn.completed") {
+            return;
+          }
+          const completedCount = yield* Ref.updateAndGet(completedCountRef, (count) => count + 1);
+          if (completedCount === 2) {
+            yield* Deferred.succeed(twoTurnsCompleted, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const hangingTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "hang forever", attachments: [] })
+        .pipe(Effect.forkChild);
+      const hangingTurnId = yield* Deferred.await(firstTurnStarted).pipe(
+        Effect.timeout("2 seconds"),
+      );
+      // The prompt has to be in flight for this to be a mid-turn send at all.
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+
+      const midTurnSend = yield* adapter
+        .sendTurn({ threadId, input: "actually, do 15 instead", attachments: [] })
+        .pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(hangingTurnFiber).pipe(Effect.timeout("2 seconds"));
+      yield* Deferred.await(twoTurnsCompleted).pipe(Effect.timeout("2 seconds"));
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.notEqual(String(midTurnSend.turnId), String(hangingTurnId));
+      assert.deepEqual(
+        turnCompletedEvents.map((event) => [String(event.turnId), event.payload.state]),
+        [
+          [String(hangingTurnId), "cancelled"],
+          [String(midTurnSend.turnId), "completed"],
+        ],
+      );
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("drops late ACP notifications after a turn is cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("omp-drop-late-cancelled-notifications");

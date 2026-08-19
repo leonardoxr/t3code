@@ -20,6 +20,12 @@ The button beside Stop performs whichever of the two `Enter` is not doing and na
 is visible without opening Settings. Both shortcuts are rebindable under **Settings** →
 **Keybindings** as `composer.sendNow` and `composer.queueFollowUp`.
 
+Some agents cannot take a message into a turn that is already running — Oh My Pi is one. There,
+**Steer** behaves as **Queue** for `Enter`, so pressing it never throws away work in progress, and
+the send-now shortcut and arrow button stop the run and answer the message as the next turn
+instead. Both say so on the button, and the message reaches the agent in about a second either
+way — queued at the end of the run, or right now with the run stopped.
+
 ## The follow-up queue
 
 A queued follow-up waits until the thread is genuinely idle — no turn running, no error, nothing
@@ -27,8 +33,9 @@ waiting on you — and is then sent on its own.
 
 Queued follow-ups appear above the composer with a count. Each one can be edited in place, removed,
 dragged to reorder, or sent right away with the arrow button (which steers the running turn if one
-is still going). A follow-up keeps the images, terminal and element context, model, and modes it was
-queued with, so sending it later reproduces what you chose at the time.
+is still going, or stops it on an agent that cannot steer). A follow-up keeps the images, terminal
+and element context, model, and modes it was queued with, so sending it later reproduces what you
+chose at the time.
 
 The queue is part of the thread, not the draft: it survives reloading the page, reconnecting, and
 restarting the server, and up to 20 follow-ups can wait per thread.
