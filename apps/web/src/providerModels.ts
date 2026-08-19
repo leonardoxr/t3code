@@ -53,6 +53,17 @@ export function getProviderInteractionModeToggle(
   return getProviderSnapshot(providers, provider)?.showInteractionModeToggle ?? true;
 }
 
+/**
+ * Whether the driver can fold a mid-turn prompt into the running turn.
+ * Absent means "native" — every legacy producer steers.
+ */
+export function getProviderMidTurnSteering(
+  providers: ReadonlyArray<ServerProvider>,
+  provider: ProviderDriverKind,
+): "native" | "queued" {
+  return getProviderSnapshot(providers, provider)?.midTurnSteering ?? "native";
+}
+
 export function isProviderEnabled(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,

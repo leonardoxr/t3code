@@ -47,4 +47,52 @@ describe("resolveFollowUpDelivery", () => {
       ).toBe("queue");
     }
   });
+
+  it("never resolves a mid-turn send on a provider whose transport cannot steer", () => {
+    // omp over ACP: a concurrent prompt would cancel or silently trail the
+    // running turn, so every would-be "send" becomes an honest queue.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("queue");
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "send",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("queue");
+    // Interrupt still works: stop + fresh prompt needs no steering.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "interrupt",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("interrupt");
+    // Idle threads send normally — nothing to steer behind.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: false,
+        intent: "default",
+        midTurnSteering: "queued",
+      }),
+    ).toBe("send");
+    // Native steering is untouched.
+    expect(
+      resolveFollowUpDelivery({
+        behavior: "steer",
+        isRunning: true,
+        intent: "default",
+        midTurnSteering: "native",
+      }),
+    ).toBe("send");
+  });
 });

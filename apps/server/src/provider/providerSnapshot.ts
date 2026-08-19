@@ -57,6 +57,8 @@ export interface ServerProviderPresentation {
   readonly badgeLabel?: string;
   readonly showInteractionModeToggle?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
+  /** "queued" when the transport cannot fold a prompt into a running turn. */
+  readonly midTurnSteering?: "native" | "queued";
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -238,6 +240,9 @@ export function buildServerProvider(input: {
       : {}),
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
+      : {}),
+    ...(input.presentation.midTurnSteering !== undefined
+      ? { midTurnSteering: input.presentation.midTurnSteering }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

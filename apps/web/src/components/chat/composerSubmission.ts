@@ -26,19 +26,32 @@ export type FollowUpIntent = "default" | "send" | "queue";
  * With no turn running there is nothing to queue behind or interrupt, so every
  * intent just sends. While one runs, an explicit `send` steers rather than
  * interrupts: of the two immediates it is the one that destroys no work.
+ *
+ * A provider whose transport cannot steer (`midTurnSteering: "queued"`) never
+ * resolves to a mid-turn `send`: the message would sit invisibly behind the
+ * running prompt while the timeline claimed delivery, so it queues instead —
+ * same delivery time, honest UI. Interrupt still works everywhere.
  */
 export function resolveFollowUpDelivery(input: {
   readonly behavior: FollowUpBehavior;
   readonly isRunning: boolean;
   readonly intent: FollowUpIntent;
+  readonly midTurnSteering?: "native" | "queued";
 }): FollowUpDelivery {
-  if (!input.isRunning || input.intent === "send") {
+  if (!input.isRunning) {
     return "send";
+  }
+  const steerImpossible = input.midTurnSteering === "queued";
+  if (input.intent === "send") {
+    return steerImpossible ? "queue" : "send";
   }
   if (input.intent === "queue" || input.behavior === "queue") {
     return "queue";
   }
-  return input.behavior === "interrupt" ? "interrupt" : "send";
+  if (input.behavior === "interrupt") {
+    return "interrupt";
+  }
+  return steerImpossible ? "queue" : "send";
 }
 
 type ComposerSubmitEvent = { preventDefault: () => void };
