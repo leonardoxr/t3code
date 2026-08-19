@@ -67,6 +67,7 @@ import {
 import {
   type AcpSessionMode,
   type AcpSessionModeState,
+  type AcpToolCallState,
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
@@ -309,6 +310,47 @@ function selectAutoApprovedPermissionOption(
     selectPermissionOptionId(request, "acceptForSession") ??
     selectPermissionOptionId(request, "accept")
   );
+}
+
+const OMP_TOOL_CALL_FILE_LIMIT = 12;
+
+/**
+ * Surfaces omp's edited-file paths on file-change tool calls. The ACP
+ * mapping carries them as `data.locations`, which the activity wire
+ * projection strips; the projection's `files: [{path}]` channel is kept
+ * and renders as the changed-file list on the work row.
+ */
+export function enrichOmpToolCallFiles(toolCall: AcpToolCallState): AcpToolCallState {
+  if (toolCall.kind !== "edit" && toolCall.kind !== "delete" && toolCall.kind !== "move") {
+    return toolCall;
+  }
+  const locations = toolCall.data.locations;
+  if (!Array.isArray(locations) || locations.length === 0) {
+    return toolCall;
+  }
+  const seen = new Set<string>();
+  const files: Array<{ readonly path: string }> = [];
+  for (const location of locations) {
+    if (files.length >= OMP_TOOL_CALL_FILE_LIMIT) {
+      break;
+    }
+    if (typeof location !== "object" || location === null || !("path" in location)) {
+      continue;
+    }
+    const path = location.path;
+    if (typeof path !== "string" || !path.trim() || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    files.push({ path });
+  }
+  if (files.length === 0) {
+    return toolCall;
+  }
+  return {
+    ...toolCall,
+    data: { ...toolCall.data, files },
+  };
 }
 
 export function ompPromptSettlementBelongsToContext(input: {
@@ -975,7 +1017,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                         provider: PROVIDER,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
-                        toolCall: event.toolCall,
+                        toolCall: enrichOmpToolCallFiles(event.toolCall),
                         rawPayload: event.rawPayload,
                       }),
                     );

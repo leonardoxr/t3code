@@ -28,6 +28,7 @@ import {
 import { ServerConfig } from "../../config.ts";
 import type { AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
 import {
+  enrichOmpToolCallFiles,
   makeOmpAdapter,
   ompPromptSettlementBelongsToContext,
   resolveOmpRequestedModeId,
@@ -171,6 +172,34 @@ it("resolves the requested Oh My Pi session mode from interaction mode", () => {
   assert.isUndefined(
     resolveOmpRequestedModeId({ interactionMode: undefined, modeState: undefined }),
   );
+});
+
+it("enrichOmpToolCallFiles surfaces edit locations as a files list", () => {
+  const enriched = enrichOmpToolCallFiles({
+    toolCallId: "tool-1",
+    kind: "edit",
+    data: {
+      toolCallId: "tool-1",
+      locations: [
+        { path: "/repo/src/a.ts", line: 3 },
+        { path: "/repo/src/a.ts" },
+        { path: "/repo/src/b.ts" },
+        { path: "   " },
+        { notAPath: true },
+      ],
+    },
+  });
+  assert.deepEqual(enriched.data.files, [{ path: "/repo/src/a.ts" }, { path: "/repo/src/b.ts" }]);
+
+  // Non-file-change kinds and location-free calls pass through untouched.
+  const readCall = {
+    toolCallId: "tool-2",
+    kind: "read",
+    data: { toolCallId: "tool-2", locations: [{ path: "/repo/src/a.ts" }] },
+  };
+  assert.strictEqual(enrichOmpToolCallFiles(readCall), readCall);
+  const bareEdit = { toolCallId: "tool-3", kind: "edit", data: { toolCallId: "tool-3" } };
+  assert.strictEqual(enrichOmpToolCallFiles(bareEdit), bareEdit);
 });
 
 it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {

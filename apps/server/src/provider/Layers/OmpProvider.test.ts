@@ -237,11 +237,60 @@ describe("buildOmpDiscoveredModelsFromConfigOptions", () => {
       },
     ]);
 
+    // The default model's sub-provider group leads; others follow alphabetically.
     expect(models.map((model) => model.slug)).toEqual([
-      "anthropic/claude-sonnet-4-5",
       "openai/gpt-5",
+      "anthropic/claude-sonnet-4-5",
     ]);
-    expect(models[1]!.isDefault).toBe(true);
+    expect(models[0]!.isDefault).toBe(true);
+    expect(models[0]!.subProvider).toBe("OpenAI");
+    expect(models[1]!.subProvider).toBe("Anthropic");
+  });
+
+  it("orders models newest-first within sub-provider groups and folds dated duplicates into legacy", () => {
+    const models = buildOmpDiscoveredModelsFromConfigOptions([
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: "anthropic/claude-opus-4-5",
+        options: [
+          { value: "anthropic/claude-3-5-sonnet-20240620", name: "Claude Sonnet 3.5" },
+          { value: "anthropic/claude-opus-4-5", name: "Claude Opus 4.5" },
+          { value: "anthropic/claude-opus-4-5-20251101", name: "Claude Opus 4.5" },
+          { value: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6" },
+          { value: "openai-codex/gpt-5.4", name: "GPT-5.4" },
+          { value: "openai-codex/gpt-5.6-sol", name: "GPT-5.6-Sol" },
+          { value: "ollama/llama3.2:3b", name: "llama3.2:3b" },
+        ],
+      },
+    ]);
+
+    expect(models.map((model) => model.slug)).toEqual([
+      // Default group (Anthropic) first, newest first.
+      "anthropic/claude-opus-4-6",
+      "anthropic/claude-opus-4-5",
+      "anthropic/claude-opus-4-5-20251101",
+      "anthropic/claude-3-5-sonnet-20240620",
+      // Remaining groups alphabetically: Ollama, then OpenAI Codex.
+      "ollama/llama3.2:3b",
+      "openai-codex/gpt-5.6-sol",
+      "openai-codex/gpt-5.4",
+    ]);
+    expect(models.find((model) => model.slug === "anthropic/claude-opus-4-5")?.isDefault).toBe(
+      true,
+    );
+    // Dated duplicate of an undated sibling is legacy; the dated-only 3.5 is not.
+    expect(
+      models.find((model) => model.slug === "anthropic/claude-opus-4-5-20251101")?.isLegacy,
+    ).toBe(true);
+    expect(
+      models.find((model) => model.slug === "anthropic/claude-3-5-sonnet-20240620")?.isLegacy,
+    ).toBeUndefined();
+    expect(models.find((model) => model.slug === "openai-codex/gpt-5.6-sol")?.subProvider).toBe(
+      "OpenAI Codex",
+    );
   });
 });
 

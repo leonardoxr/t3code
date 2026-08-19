@@ -115,6 +115,77 @@ function ompModelsFromSettings(
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
+/**
+ * Display labels for omp's model-id prefixes (`<sub-provider>/<model>`).
+ * Unknown prefixes fall back to title-cased tokens so new omp providers
+ * still group sensibly without a T3 release.
+ */
+const OMP_SUB_PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  "openai-codex": "OpenAI Codex",
+  openai: "OpenAI",
+  google: "Google",
+  gemini: "Google",
+  "google-vertex": "Google Vertex",
+  ollama: "Ollama",
+  groq: "Groq",
+  cerebras: "Cerebras",
+  xai: "xAI",
+  openrouter: "OpenRouter",
+  mistral: "Mistral",
+  zai: "Z.ai",
+  minimax: "MiniMax",
+  opencode: "OpenCode",
+  copilot: "GitHub Copilot",
+  "github-copilot": "GitHub Copilot",
+  bedrock: "AWS Bedrock",
+  azure: "Azure OpenAI",
+};
+
+function ompSubProviderLabel(prefix: string): string {
+  const known = OMP_SUB_PROVIDER_LABELS[prefix];
+  if (known) {
+    return known;
+  }
+  return prefix
+    .split(/[-_]+/)
+    .filter((token) => token.length > 0)
+    .map((token) => token[0]!.toUpperCase() + token.slice(1))
+    .join(" ");
+}
+
+/**
+ * Numeric version tokens of a model id, for newest-first ordering.
+ * Eight-digit date stamps (`-20250514`) are snapshot markers, not version
+ * numbers — they rank as oldest so `claude-opus-4-8` outranks
+ * `claude-opus-4-20250514`.
+ */
+function ompModelVersionRank(modelId: string): ReadonlyArray<number> {
+  return (modelId.match(/\d+(?:\.\d+)?/g) ?? []).map((token) =>
+    /^\d{8}$/.test(token) ? -1 : Number(token),
+  );
+}
+
+function compareVersionRanksDesc(a: ReadonlyArray<number>, b: ReadonlyArray<number>): number {
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    // A missing token ranks highest: the shorter id is the canonical alias
+    // (`claude-opus-4-5` before its `-20251101` snapshot, `gpt-5` before
+    // `gpt-5.4`), matching how providers point bare ids at the latest rev.
+    const delta = (b[index] ?? Number.POSITIVE_INFINITY) - (a[index] ?? Number.POSITIVE_INFINITY);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return 0;
+}
+
+/** Date-stamped duplicate of an undated sibling (`…-20251101`). */
+function isDatedDuplicate(modelId: string, allIds: ReadonlySet<string>): boolean {
+  const match = /^(.*)-\d{8}$/.exec(modelId);
+  return match !== null && allIds.has(match[1]!);
+}
+
 export function buildOmpDiscoveredModelsFromConfigOptions(
   configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
 ): ReadonlyArray<ServerProviderModel> {
@@ -127,25 +198,69 @@ export function buildOmpDiscoveredModelsFromConfigOptions(
   const capabilities = buildOmpCapabilitiesFromConfigOptions(configOptions);
   const currentModelId =
     typeof modelOption.currentValue === "string" ? modelOption.currentValue.trim() : "";
+
+  interface OmpDiscoveredModel {
+    readonly slug: string;
+    readonly name: string;
+    readonly subProvider: string | undefined;
+    readonly versionRank: ReadonlyArray<number>;
+    readonly isDefault: boolean;
+  }
+
   const seen = new Set<string>();
-  return modelOption.options
+  const discovered = modelOption.options
     .flatMap((entry) => ("value" in entry ? [entry] : entry.options))
-    .flatMap((option): Array<ServerProviderModel> => {
+    .flatMap((option): Array<OmpDiscoveredModel> => {
       const slug = option.value.trim();
       if (!slug || seen.has(slug)) {
         return [];
       }
       seen.add(slug);
+      const separatorIndex = slug.indexOf("/");
+      const prefix = separatorIndex > 0 ? slug.slice(0, separatorIndex) : "";
+      const modelId = separatorIndex > 0 ? slug.slice(separatorIndex + 1) : slug;
       return [
         {
           slug,
           name: option.name.trim() || slug,
-          isCustom: false,
-          ...(currentModelId && slug === currentModelId ? { isDefault: true } : {}),
-          capabilities,
+          subProvider: prefix ? ompSubProviderLabel(prefix) : undefined,
+          versionRank: ompModelVersionRank(modelId),
+          isDefault: currentModelId.length > 0 && slug === currentModelId,
         },
       ];
     });
+
+  // Group by sub-provider — the default model's group leads, the rest are
+  // alphabetical — and order newest-first within each group so the picker
+  // reads latest → older. Date-stamped duplicates of an undated id fold
+  // into the picker's collapsed legacy section.
+  const defaultGroup = discovered.find((model) => model.isDefault)?.subProvider;
+  const groupSortKey = (subProvider: string | undefined): string =>
+    `${subProvider === defaultGroup ? "0" : "1"}:${subProvider ?? "\uffff"}`;
+  const allSlugs = new Set(discovered.map((model) => model.slug));
+  return discovered
+    .toSorted((a, b) => {
+      const groupDelta = groupSortKey(a.subProvider).localeCompare(groupSortKey(b.subProvider));
+      if (groupDelta !== 0) {
+        return groupDelta;
+      }
+      const versionDelta = compareVersionRanksDesc(a.versionRank, b.versionRank);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return a.name.localeCompare(b.name);
+    })
+    .map(
+      (model): ServerProviderModel => ({
+        slug: model.slug,
+        name: model.name,
+        ...(model.subProvider ? { subProvider: model.subProvider } : {}),
+        isCustom: false,
+        ...(model.isDefault ? { isDefault: true } : {}),
+        ...(isDatedDuplicate(model.slug, allSlugs) ? { isLegacy: true } : {}),
+        capabilities,
+      }),
+    );
 }
 
 export function buildOmpSlashCommands(
