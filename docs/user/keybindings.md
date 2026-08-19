@@ -42,10 +42,12 @@ Commands are IDs like `terminal.toggle`, `commandPalette.toggle`, `preview.refre
 Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
 
 `composer.sendNow` submits the composer draft immediately — steering the running turn when there is
-one, or stopping it first on an agent that cannot steer — and defaults to `mod+enter`.
-`composer.queueFollowUp` parks the draft as a queued follow-up instead and defaults to
+one, or stopping it first on an agent that cannot steer — and defaults to both `mod+enter` and
+`alt+enter`. `composer.queueFollowUp` parks the draft as a queued follow-up instead and defaults to
 `mod+shift+enter`. Both ignore **Settings** → **General** → **Follow-up behavior**, which only
-decides what plain `Enter` does. See [Message composer](./composer.md).
+decides what plain `Enter` does. A config that already binds `composer.sendNow` keeps its own
+shortcut: defaults are only filled in for commands your config does not mention.
+See [Message composer](./composer.md).
 
 `themeEditor.toggle` opens or closes the floating theme editor and defaults to
 `mod+alt+shift+t`. Select a color label to spotlight the elements that use it; select the label
