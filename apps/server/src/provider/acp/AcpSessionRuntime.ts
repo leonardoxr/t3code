@@ -72,6 +72,16 @@ export interface AcpSessionRuntimeOptions {
   readonly authMethodId: string;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
+  /**
+   * Extra emission predicate for in-flight `tool_call_update`s the default
+   * title/detail gate would suppress. omp's task tool streams subagent
+   * progress in `rawOutput` with an unchanged title, which the default gate
+   * exists to drop for ordinary output growth.
+   */
+  readonly shouldEmitSuppressedToolCallUpdate?: (
+    previous: AcpToolCallState | undefined,
+    next: AcpToolCallState,
+  ) => boolean;
   readonly protocolLogging?: {
     readonly logIncoming?: boolean;
     readonly logOutgoing?: boolean;
@@ -412,6 +422,9 @@ export const make = (
           assistantSegmentRef,
           assistantItemRuntimeId,
           params: notification,
+          ...(options.shouldEmitSuppressedToolCallUpdate
+            ? { shouldEmitSuppressedToolCallUpdate: options.shouldEmitSuppressedToolCallUpdate }
+            : {}),
         });
       }),
     );
@@ -863,6 +876,7 @@ const handleSessionUpdate = ({
   assistantSegmentRef,
   assistantItemRuntimeId,
   params,
+  shouldEmitSuppressedToolCallUpdate,
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
@@ -872,6 +886,10 @@ const handleSessionUpdate = ({
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
   readonly params: EffectAcpSchema.SessionNotification;
+  readonly shouldEmitSuppressedToolCallUpdate?: (
+    previous: AcpToolCallState | undefined,
+    next: AcpToolCallState,
+  ) => boolean;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
     const parsed = parseSessionUpdateEvent(params);
@@ -900,7 +918,10 @@ const handleSessionUpdate = ({
           }
           return [{ previous, merged: nextToolCall }, next] as const;
         });
-        if (!shouldEmitToolCallUpdate(previous, merged)) {
+        if (
+          !shouldEmitToolCallUpdate(previous, merged) &&
+          !(shouldEmitSuppressedToolCallUpdate?.(previous, merged) ?? false)
+        ) {
           continue;
         }
         yield* Queue.offer(queue, {

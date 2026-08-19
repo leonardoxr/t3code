@@ -154,6 +154,37 @@ function isEquivalent(left: string | undefined, right: string | undefined): bool
   return normalizedLeft !== undefined && normalizedLeft === normalizedRight;
 }
 
+/**
+ * Generic titles adapters stamp when they have nothing better; an informative
+ * title (e.g. omp's per-call intent like "Reading wire projection") beats the
+ * flattened action label, so these never win the row heading.
+ */
+const GENERIC_TOOL_TITLES = new Set([
+  "tool",
+  "tool call",
+  "terminal",
+  "task",
+  "read",
+  "read file",
+  "write",
+  "edit",
+  "find",
+  "grep",
+  "search",
+  "fetch",
+  "ran command",
+  "changed files",
+  "searched files",
+]);
+
+function informativeTitle(title: string | undefined): string | undefined {
+  const firstLine = asTrimmedString(title?.split("\n", 1)[0]);
+  if (!firstLine) {
+    return undefined;
+  }
+  return GENERIC_TOOL_TITLES.has(firstLine.toLowerCase()) ? undefined : firstLine;
+}
+
 function classifyToolAction(input: {
   readonly itemType?: ToolLifecycleItemType | null | undefined;
   readonly title?: string | undefined;
@@ -212,6 +243,17 @@ export function deriveToolActivityPresentation(
   });
 
   if (action === "command") {
+    // omp titles shell calls "$ <command>" — redundant with the command
+    // detail, so it still flattens to the stable label. A distinct title
+    // (eval headline, custom intent) is worth surfacing.
+    const heading = informativeTitle(title);
+    const headingCommand = heading?.replace(/^\$\s+/u, "");
+    if (heading && !isEquivalent(headingCommand, command)) {
+      return {
+        summary: heading,
+        ...(command ? { detail: command } : {}),
+      };
+    }
     return {
       summary: "Ran command",
       ...(command ? { detail: command } : {}),
@@ -219,6 +261,13 @@ export function deriveToolActivityPresentation(
   }
 
   if (action === "read") {
+    const heading = informativeTitle(title);
+    if (heading && !isEquivalent(heading, primaryPath)) {
+      return {
+        summary: heading,
+        ...(primaryPath ? { detail: primaryPath } : {}),
+      };
+    }
     if (primaryPath) {
       return {
         summary: "Read file",
@@ -231,6 +280,13 @@ export function deriveToolActivityPresentation(
   }
 
   if (action === "file_change") {
+    const heading = informativeTitle(title);
+    if (heading && !isEquivalent(heading, primaryPath)) {
+      return {
+        summary: heading,
+        ...(primaryPath ? { detail: primaryPath } : {}),
+      };
+    }
     return {
       summary: "Changed files",
       ...(primaryPath ? { detail: primaryPath } : {}),
@@ -242,6 +298,13 @@ export function deriveToolActivityPresentation(
       asTrimmedString(asRecord(data?.rawInput)?.query) ??
       asTrimmedString(asRecord(data?.rawInput)?.pattern) ??
       asTrimmedString(asRecord(data?.rawInput)?.searchTerm);
+    const heading = informativeTitle(title);
+    if (heading && !isEquivalent(heading, query)) {
+      return {
+        summary: heading,
+        ...(query ? { detail: query } : {}),
+      };
+    }
     return {
       summary: "Searched files",
       ...(query ? { detail: query } : {}),

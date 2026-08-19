@@ -38,18 +38,22 @@ import {
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
+  type WorkLogDiff,
 } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
 import {
   getRenderablePatch,
+  getRenderableDiffFromContents,
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
+  BugIcon,
   CheckIcon,
   ChevronDownIcon,
+  CodeIcon,
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
@@ -1944,8 +1948,10 @@ function formatWorkingTimerNow(startIso: string): string {
 
 type WorkEntryIconName =
   | "bot"
+  | "bug"
   | "check"
   | "circle-alert"
+  | "code"
   | "eye"
   | "globe"
   | "hammer"
@@ -1960,8 +1966,12 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
   switch (name) {
     case "bot":
       return <BotIcon className={className} aria-hidden />;
+    case "bug":
+      return <BugIcon className={className} aria-hidden />;
     case "check":
       return <CheckIcon className={className} aria-hidden />;
+    case "code":
+      return <CodeIcon className={className} aria-hidden />;
     case "circle-alert":
       return <CircleAlertIcon className={className} aria-hidden />;
     case "eye":
@@ -2013,13 +2023,42 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
   };
 }
 
+/** Known omp tool/device names → row icon. Unknown names keep the itemType fallback. */
+const TOOL_INFO_ICON_BY_NAME: Record<string, WorkEntryIconName> = {
+  lsp: "code",
+  debug: "bug",
+  browser: "globe",
+  ast_edit: "square-pen",
+  hub: "message-circle",
+};
+
+/** Compact "action · target" line for rows whose only identity is toolInfo. */
+function toolInfoPreview(toolInfo: NonNullable<TimelineWorkEntry["toolInfo"]>): string | null {
+  const args = toolInfo.args ?? {};
+  const file = typeof args.file === "string" ? args.file : undefined;
+  const line = typeof args.line === "number" ? args.line : undefined;
+  const target =
+    (file ? (line !== undefined ? `${file}:${line}` : file) : undefined) ??
+    (typeof args.symbol === "string" ? args.symbol : undefined) ??
+    (typeof args.pattern === "string" ? args.pattern : undefined) ??
+    (typeof args.query === "string" ? args.query : undefined) ??
+    (typeof args.url === "string" ? args.url : undefined) ??
+    (typeof args.expression === "string" ? args.expression : undefined);
+  const parts = [toolInfo.action, target].filter(
+    (part): part is string => part !== undefined && part.length > 0,
+  );
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "toolInfo">,
   workspaceRoot: string | undefined,
 ) {
   if (workEntry.command) return workEntry.command;
   if (workEntry.detail) return workEntry.detail;
-  if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
+  if ((workEntry.changedFiles?.length ?? 0) === 0) {
+    return workEntry.toolInfo ? toolInfoPreview(workEntry.toolInfo) : null;
+  }
   const [firstPath] = workEntry.changedFiles ?? [];
   if (!firstPath) return null;
   const displayPath = formatWorkspaceRelativePath(firstPath, workspaceRoot);
@@ -2041,10 +2080,23 @@ function workEntryRawCommand(
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
+  options?: { omitFullOutput?: boolean },
 ): string | null {
   const blocks: string[] = [];
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
     blocks.push(`MCP call\n${JSON.stringify(workEntry.toolData, null, 2)}`);
+  }
+  const toolInfo = workEntry.toolInfo;
+  if (toolInfo && (toolInfo.action || toolInfo.args)) {
+    const argLines = Object.entries(toolInfo.args ?? {}).map(
+      ([key, value]) => `${key}: ${String(value)}`,
+    );
+    const header = [[toolInfo.name, toolInfo.action].filter(Boolean).join(" "), ...argLines]
+      .filter((lineText) => lineText.length > 0)
+      .join("\n");
+    if (header.length > 0) {
+      blocks.push(header);
+    }
   }
   const raw = workEntryRawCommand(workEntry);
   if (raw?.trim()) {
@@ -2052,7 +2104,10 @@ function buildToolCallExpandedBody(
   } else if (workEntry.command?.trim()) {
     blocks.push(workEntry.command.trim());
   }
-  if (workEntry.detail?.trim()) {
+  // The capped multi-line output supersedes the one-line detail summary.
+  if (workEntry.fullOutputText?.trim() && !options?.omitFullOutput) {
+    blocks.push(workEntry.fullOutputText.trim());
+  } else if (workEntry.detail?.trim()) {
     blocks.push(workEntry.detail.trim());
   }
   const changedFiles = workEntry.changedFiles ?? [];
@@ -2079,6 +2134,11 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (workEntry.requestKind === "command") return "terminal";
   if (workEntry.requestKind === "file-read") return "eye";
   if (workEntry.requestKind === "file-change") return "square-pen";
+  const toolInfoIcon = workEntry.toolInfo?.name
+    ? TOOL_INFO_ICON_BY_NAME[workEntry.toolInfo.name]
+    : undefined;
+  if (toolInfoIcon) return toolInfoIcon;
+  if (workEntry.toolInfo?.code) return "code";
 
   if (workEntry.itemType === "command_execution" || workEntry.command) {
     return "terminal";
@@ -2269,13 +2329,53 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   return <PlainWorkEntryRow workEntry={workEntry} workspaceRoot={workspaceRoot} />;
 });
 
+/** Inline per-file diffs on an expanded tool row. Metadata parses lazily —
+ * this component only mounts once the row is expanded. */
+const WorkEntryDiffSection = memo(function WorkEntryDiffSection(props: {
+  diffs: ReadonlyArray<WorkLogDiff>;
+  resolvedTheme: "light" | "dark";
+  workspaceRoot: string | undefined;
+}) {
+  const { diffs, resolvedTheme, workspaceRoot } = props;
+  const fileDiffs = useMemo(
+    () =>
+      diffs.map((diff) => ({
+        path: diff.path,
+        fileDiff: getRenderableDiffFromContents(diff.path, diff.oldText, diff.newText),
+      })),
+    [diffs],
+  );
+  return (
+    <div className="mt-2 space-y-2">
+      {fileDiffs.map(({ path, fileDiff }) =>
+        fileDiff ? (
+          <FileDiff
+            key={path}
+            fileDiff={fileDiff}
+            options={{
+              collapsed: false,
+              diffStyle: "unified",
+              theme: resolveDiffThemeName(resolvedTheme),
+            }}
+          />
+        ) : (
+          <p key={path} className="font-mono text-secondary-label text-xs">
+            {formatWorkspaceRelativePath(path, workspaceRoot)}
+          </p>
+        ),
+      )}
+    </div>
+  );
+});
+
 const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
-  const rowThreadId = use(TimelineRowCtx).threadRef?.threadId ?? null;
+  const ctx = use(TimelineRowCtx);
+  const rowThreadId = ctx.threadRef?.threadId ?? null;
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
@@ -2289,8 +2389,25 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       ? null
       : rawPreview;
   const displayText = preview ? `${heading} - ${preview}` : heading;
-  const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
-  const canExpand = expandedBody !== null;
+  const reasoningText = workEntry.reasoningText;
+  const toolCode = workEntry.toolInfo?.code;
+  // LSP results are markdown (hover docs, fenced signatures); render them
+  // through ChatMarkdown instead of the monospace <pre>.
+  const renderResultAsMarkdown =
+    workEntry.toolInfo?.name === "lsp" && workEntry.fullOutputText !== undefined;
+  const expandedBody = reasoningText
+    ? null
+    : buildToolCallExpandedBody(workEntry, workspaceRoot, {
+        omitFullOutput: renderResultAsMarkdown,
+      });
+  // Diffs render lazily: metadata is only computed once the row expands.
+  const hasDiffs = (workEntry.diffs?.length ?? 0) > 0;
+  const canExpand =
+    expandedBody !== null ||
+    hasDiffs ||
+    toolCode !== undefined ||
+    renderResultAsMarkdown ||
+    (reasoningText !== undefined && reasoningText !== workEntry.label);
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2309,7 +2426,9 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
     ? "font-medium text-warning"
     : showDestructiveRowStyle
       ? "font-medium text-destructive"
-      : "font-medium text-foreground";
+      : reasoningText !== undefined
+        ? "font-normal italic text-secondary-label"
+        : "font-medium text-foreground";
   const turnSettled = !activity.activeTurnInProgress;
   const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
   const showSuccessIndicator =
@@ -2417,13 +2536,52 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       {workEntry.imagePath && rowThreadId ? (
         <WorkEntryInlineImage imagePath={workEntry.imagePath} threadId={rowThreadId} />
       ) : null}
-      {expanded && canExpand && expandedBody ? (
+      {expanded && canExpand ? (
         <div
           className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
-          <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+          {reasoningText !== undefined ? (
+            <ChatMarkdown
+              text={reasoningText}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+              className="text-secondary-label text-[12px] italic"
+            />
+          ) : (
+            <>
+              {toolCode ? (
+                <ChatMarkdown
+                  text={`\`\`\`\`${toolCode.language}\n${toolCode.text}\n\`\`\`\``}
+                  cwd={ctx.markdownCwd}
+                  threadRef={ctx.threadRef ?? undefined}
+                  skills={ctx.skills}
+                  className="text-[12px]"
+                />
+              ) : null}
+              {expandedBody ? (
+                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+              ) : null}
+              {renderResultAsMarkdown && workEntry.fullOutputText ? (
+                <ChatMarkdown
+                  text={workEntry.fullOutputText}
+                  cwd={ctx.markdownCwd}
+                  threadRef={ctx.threadRef ?? undefined}
+                  skills={ctx.skills}
+                  className="mt-1 text-secondary-label text-[12px]"
+                />
+              ) : null}
+              {hasDiffs ? (
+                <WorkEntryDiffSection
+                  diffs={workEntry.diffs!}
+                  resolvedTheme={ctx.resolvedTheme}
+                  workspaceRoot={workspaceRoot}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
     </div>
