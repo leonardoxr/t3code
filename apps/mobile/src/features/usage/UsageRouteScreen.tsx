@@ -18,8 +18,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { useSubscriptionUsage } from "../../state/subscriptionUsage";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
+import { SubscriptionQuotaGauges } from "./SubscriptionQuotaGauges";
 import { UsageDailyChart } from "./UsageDailyChart";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
@@ -44,6 +46,7 @@ export function UsageRouteScreen() {
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { providers: quotaProviders, refresh: refreshQuota } = useSubscriptionUsage();
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -80,6 +83,8 @@ export function UsageRouteScreen() {
     });
   };
   const refreshWindow = () => {
+    // One pull re-probes plan quota too; it is the cheap half of this screen.
+    refreshQuota();
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
       nextWindow.sinceDay === window.sinceDay &&
@@ -109,6 +114,8 @@ export function UsageRouteScreen() {
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refreshWindow} />}
       >
+        <SubscriptionQuotaGauges providers={quotaProviders} />
+
         <SegmentedControl
           options={WINDOW_OPTIONS.map((option) => ({ value: option.days, label: option.label }))}
           selected={windowDays}

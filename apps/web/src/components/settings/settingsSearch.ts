@@ -106,16 +106,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
-    id: "auto-settle-inactive-threads",
-    title: "Auto-settle inactive threads",
-    to: "/settings/general",
-  },
-  {
-    id: "auto-settle-merged-threads",
-    title: "Auto-settle merged threads",
-    to: "/settings/general",
-  },
-  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",
@@ -185,11 +175,6 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "legacy-token-streaming",
     title: "Stream token by token (legacy)",
-    to: "/settings/general",
-  },
-  {
-    id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
     to: "/settings/general",
   },
   {

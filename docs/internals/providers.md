@@ -80,6 +80,35 @@ spills the whole accumulated text as one delta. The buffer also flushes at inter
 when a request opens (approval) or user input is requested, via
 `flushBufferedAssistantMessagesForTurn`.
 
+## Plan quota probes
+
+[`SubscriptionUsageService`][quota] answers `server.getSubscriptionUsage` with how much of each
+provider plan's rolling quota is spent. It is deliberately separate from [`UsageService`][usage],
+which reprices historical spend from transcripts: this one answers "will the next turn run".
+
+Both providers are pulled rather than observed, because the gauge has to be populated with no thread
+running:
+
+- Claude: `GET https://api.anthropic.com/api/oauth/usage`, authenticated with Claude Code's own
+  stored OAuth token (macOS login keychain, otherwise `<claudeHome>/.credentials.json`). The
+  credential is read, never written — refreshing it is Claude Code's job. The response is treated as
+  an open map of `{ utilization, resets_at }` buckets so plan windows we have never heard of still
+  render.
+- Codex: a short-lived `codex app-server` is spawned for `account/rateLimits/read`, typed by the
+  generated protocol in `packages/effect-codex-app-server`. `rateLimitsByLimitId` is serialized in
+  a different order on every call, so buckets are sorted by key or the gauge's windows reshuffle
+  between polls.
+
+Neither probe spends plan quota, so polling still works once a limit is reached. Both run
+concurrently behind independent timeouts, and every failure becomes a per-provider status rather
+than an RPC error, so one broken CLI cannot blank the other's gauge. Results are cached for a minute
+per provider: spawning an app-server for every poll of every connected client is the cost that cache
+exists to avoid.
+
+A bucket that is both unused and has no reset time is dropped — that is how both providers report a
+window the plan was never granted, and an empty ring reads as "0% spent" rather than "nothing to
+report".
+
 [drivers]: ../../apps/server/src/provider/builtInDrivers.ts
 [codex]: ../../apps/server/src/provider/Drivers/CodexDriver.ts
 [claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
@@ -96,3 +125,5 @@ when a request opens (approval) or user input is requested, via
 [ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
+[quota]: ../../apps/server/src/subscriptionUsage/SubscriptionUsageService.ts
+[usage]: ../../apps/server/src/usage/UsageService.ts

@@ -41,10 +41,10 @@ Commands are IDs like `terminal.toggle`, `commandPalette.toggle`, `preview.refre
 `projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
 Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
 
-`composer.followUpOverride` submits the composer draft with the opposite of **Settings** →
-**General** → **Follow-up behavior** for one message — queueing when your default sends
-immediately, steering when your default is Queue — and defaults to `mod+shift+enter`. See
-[Message composer](./composer.md).
+`composer.sendNow` submits the composer draft immediately — steering the running turn when there is
+one — and defaults to `mod+enter`. `composer.queueFollowUp` parks the draft as a queued follow-up
+instead and defaults to `mod+shift+enter`. Both ignore **Settings** → **General** → **Follow-up
+behavior**, which only decides what plain `Enter` does. See [Message composer](./composer.md).
 
 `themeEditor.toggle` opens or closes the floating theme editor and defaults to
 `mod+alt+shift+t`. Select a color label to spotlight the elements that use it; select the label
@@ -66,12 +66,11 @@ characters and uses SQLite's ASCII case-insensitive matching.
 The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
 always matches the build you are running. Use that rather than a copied list.
 
-Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
-inherits the project you were in, along with model and mode selections. Branch, worktree, and
-environment mode always come from your configured defaults, not from the thread you were looking
-at. To keep a worktree, use the explicit "new thread in this worktree" action in the branch
-toolbar. The only difference between the two commands: with the current sidebar and more than one
-project, `chat.new` opens a project chooser first.
+Note that `chat.new` and `chat.newLocal` both create a thread through the same path, with no
+difference between them. A new thread inherits the project you were in, along with model and mode
+selections. Branch, worktree, and environment mode always come from your configured defaults, not
+from the thread you were looking at. To keep a worktree, use the explicit "new thread in this
+worktree" action in the branch toolbar.
 
 ## `when` Conditions
 

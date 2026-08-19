@@ -9,6 +9,7 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import {
   getThreadSortTimestamp,
+  sortPinnedThreadsByOrderKey,
   sortThreads,
   toSortableTimestamp,
 } from "@t3tools/client-runtime/state/thread-sort";
@@ -195,9 +196,27 @@ function selectRecentThreads(
 ): ReadonlyArray<EnvironmentThreadShell> {
   const cutoff = now - RECENT_THREAD_WINDOW_MS;
   const recent = sortedThreads.filter(
-    (thread) => getThreadSortTimestamp(thread, threadSortOrder) >= cutoff,
+    // A pin is an explicit "keep this in front of me", so it outranks the
+    // recency window however long the thread has been quiet.
+    (thread) =>
+      thread.pinnedAt != null || getThreadSortTimestamp(thread, threadSortOrder) >= cutoff,
   );
   return recent.length > 0 ? recent : sortedThreads.slice(0, RECENT_THREAD_FALLBACK_COUNT);
+}
+
+/**
+ * Pinned threads lead their project group. The grouped list has no separate
+ * pinned section, so a pin reads as position (plus the row's pin glyph), and
+ * `pinOrderKey` preserves the order the user built with Move up / Move down.
+ */
+function hoistPinnedThreads(
+  sortedThreads: ReadonlyArray<EnvironmentThreadShell>,
+): ReadonlyArray<EnvironmentThreadShell> {
+  const pinned = sortedThreads.filter((thread) => thread.pinnedAt != null);
+  if (pinned.length === 0) return sortedThreads;
+  const arranged = sortPinnedThreadsByOrderKey(pinned);
+  if (pinned.length === sortedThreads.length) return arranged;
+  return [...arranged, ...sortedThreads.filter((thread) => thread.pinnedAt == null)];
 }
 
 export function buildHomeThreadGroups(input: {
@@ -327,7 +346,8 @@ export function buildHomeThreadGroups(input: {
       continue;
     }
 
-    const sortedThreads = sortThreads(matchingThreads, input.threadSortOrder);
+    const activitySortedThreads = sortThreads(matchingThreads, input.threadSortOrder);
+    const sortedThreads = hoistPinnedThreads(activitySortedThreads);
     // An active search should reach the full history, so the recency window
     // only trims the default (no-query) view.
     const recentThreads =
@@ -337,7 +357,7 @@ export function buildHomeThreadGroups(input: {
 
     // A stale project id still resolves to the canonical member with the same
     // environment/path, so quick creation follows the machine with the newest activity.
-    const lastActiveProject = Arr.head(sortedThreads).pipe(
+    const lastActiveProject = Arr.head(activitySortedThreads).pipe(
       Option.flatMap((thread) =>
         Arr.findFirst(
           input.projects,

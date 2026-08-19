@@ -556,6 +556,142 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("carries the viewed image path on imageView lifecycle events", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-image-start"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image_1"),
+        payload: {
+          startedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "imageView",
+            id: "image_1",
+            path: "/ws/shot.png",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      yield* runtime.emit({
+        id: asEventId("evt-image-complete"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image_1"),
+        payload: {
+          completedAtMs: 1_778_000_000_001,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "imageView",
+            id: "image_1",
+            path: "/ws/shot.png",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events.length, 2);
+
+      const started = events[0];
+      NodeAssert.equal(started?.type, "item.started");
+      if (started?.type === "item.started") {
+        NodeAssert.equal(started.payload.itemType, "image_view");
+        NodeAssert.equal(started.payload.imagePath, "/ws/shot.png");
+      }
+
+      const completed = events[1];
+      NodeAssert.equal(completed?.type, "item.completed");
+      if (completed?.type === "item.completed") {
+        NodeAssert.equal(completed.payload.itemType, "image_view");
+        NodeAssert.equal(completed.payload.imagePath, "/ws/shot.png");
+      }
+    }),
+  );
+
+  it.effect("omits the image path for non-image items and non-image paths", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-message-no-image"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("msg_2"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "msg_2",
+            text: "no image here",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      yield* runtime.emit({
+        id: asEventId("evt-image-not-renderable"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image_2"),
+        payload: {
+          completedAtMs: 1_778_000_000_001,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "imageView",
+            id: "image_2",
+            path: "/ws/notes.txt",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events.length, 2);
+
+      const message = events[0];
+      NodeAssert.equal(message?.type, "item.completed");
+      if (message?.type === "item.completed") {
+        NodeAssert.equal(message.payload.itemType, "assistant_message");
+        NodeAssert.equal(message.payload.imagePath, undefined);
+      }
+
+      const unrenderable = events[1];
+      NodeAssert.equal(unrenderable?.type, "item.completed");
+      if (unrenderable?.type === "item.completed") {
+        NodeAssert.equal(unrenderable.payload.itemType, "image_view");
+        NodeAssert.equal(unrenderable.payload.imagePath, undefined);
+      }
+    }),
+  );
+
   it.effect("labels MCP lifecycle entries with server and tool names", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

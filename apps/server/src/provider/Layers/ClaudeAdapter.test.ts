@@ -1293,6 +1293,152 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  /**
+   * Drives one file tool call end to end (content_block_start → tool_result →
+   * result) and returns the runtime events the turn emitted.
+   */
+  function fileToolCallRuntimeEvents(toolName: string, filePath: string) {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "look at it",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-read",
+        uuid: "stream-read-start",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-read-1",
+            name: toolName,
+            input: { file_path: filePath },
+          },
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-read",
+        uuid: "user-read-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-read-1",
+              content: "read ok",
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-read",
+        uuid: "result-read",
+      } as unknown as SDKMessage);
+
+      return Array.from(yield* Fiber.join(runtimeEventsFiber));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  }
+
+  it.effect("carries the image path of a Read tool call that opened an image", () =>
+    Effect.gen(function* () {
+      const runtimeEvents = yield* fileToolCallRuntimeEvents("Read", "/ws/shot.png");
+
+      const started = runtimeEvents.find((event) => event.type === "item.started");
+      assert.equal(started?.type, "item.started");
+      if (started?.type === "item.started") {
+        assert.equal(started.payload.itemType, "dynamic_tool_call");
+        assert.equal(started.payload.imagePath, "/ws/shot.png");
+      }
+
+      const updated = runtimeEvents.find((event) => event.type === "item.updated");
+      assert.equal(updated?.type, "item.updated");
+      if (updated?.type === "item.updated") {
+        assert.equal(updated.payload.itemType, "dynamic_tool_call");
+        assert.equal(updated.payload.imagePath, "/ws/shot.png");
+      }
+
+      const completed = runtimeEvents.find((event) => event.type === "item.completed");
+      assert.equal(completed?.type, "item.completed");
+      if (completed?.type === "item.completed") {
+        assert.equal(completed.payload.itemType, "dynamic_tool_call");
+        assert.equal(completed.payload.imagePath, "/ws/shot.png");
+      }
+    }),
+  );
+
+  it.effect("omits the image path when a Read tool call opened a non-image file", () =>
+    Effect.gen(function* () {
+      const runtimeEvents = yield* fileToolCallRuntimeEvents("Read", "/ws/index.ts");
+
+      let itemEventCount = 0;
+      for (const event of runtimeEvents) {
+        if (
+          event.type !== "item.started" &&
+          event.type !== "item.updated" &&
+          event.type !== "item.completed"
+        ) {
+          continue;
+        }
+        itemEventCount += 1;
+        assert.equal(event.payload.itemType, "dynamic_tool_call");
+        assert.equal(event.payload.imagePath, undefined);
+      }
+      assert.equal(itemEventCount, 3);
+    }),
+  );
+
+  it.effect("omits the image path when a tool writes an image instead of reading it", () =>
+    Effect.gen(function* () {
+      // Write carries the same `file_path`; an agent rewriting a directory of
+      // icons must not splash them across the timeline.
+      const runtimeEvents = yield* fileToolCallRuntimeEvents("Write", "/ws/icons/logo.svg");
+
+      let itemEventCount = 0;
+      for (const event of runtimeEvents) {
+        if (
+          event.type !== "item.started" &&
+          event.type !== "item.updated" &&
+          event.type !== "item.completed"
+        ) {
+          continue;
+        }
+        itemEventCount += 1;
+        assert.equal(event.payload.imagePath, undefined);
+      }
+      assert.equal(itemEventCount, 3);
+    }),
+  );
+
   it.effect("falls back to a default plan step label for blank TodoWrite content", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
