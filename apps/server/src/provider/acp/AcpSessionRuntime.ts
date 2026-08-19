@@ -31,6 +31,7 @@ import {
   sessionUpdateIsReplay,
   waitForSessionLoadReplayIdle,
   type SessionLoadGate,
+  type AcpAvailableCommand,
   type AcpParsedSessionEvent,
   type AcpSessionModeState,
   type AcpToolCallState,
@@ -187,6 +188,8 @@ export class AcpSessionRuntime extends Context.Service<
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
     /** Latest configuration options observed from session setup and configuration writes. */
     readonly getConfigOptions: Effect.Effect<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
+    /** Latest slash-command catalog observed from `available_commands_update` notifications. */
+    readonly getAvailableCommands: Effect.Effect<ReadonlyArray<AcpAvailableCommand>>;
     /**
      * Sends a prompt turn to the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/prompt
@@ -261,6 +264,11 @@ interface AcpAssistantSegmentState {
   readonly activeItemId?: string;
 }
 
+interface AcpThoughtSegmentState {
+  readonly nextSegmentIndex: number;
+  readonly activeItemId?: string;
+}
+
 interface EnsureActiveAssistantSegmentResult {
   readonly itemId: string;
   readonly startedEvent?: Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>;
@@ -290,6 +298,8 @@ export const make = (
       ),
     );
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
+    const thoughtSegmentRef = yield* Ref.make<AcpThoughtSegmentState>({ nextSegmentIndex: 0 });
+    const availableCommandsRef = yield* Ref.make<ReadonlyArray<AcpAvailableCommand>>([]);
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
     const promptSerializationSemaphore = yield* Semaphore.make(1);
@@ -397,6 +407,8 @@ export const make = (
           queue: eventQueue,
           modeStateRef,
           toolCallsRef,
+          thoughtSegmentRef,
+          availableCommandsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
           params: notification,
@@ -716,6 +728,7 @@ export const make = (
       }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
+      getAvailableCommands: Ref.get(availableCommandsRef),
       prompt: (payload) =>
         promptSerializationSemaphore.withPermit(
           Effect.gen(function* () {
@@ -845,6 +858,8 @@ const handleSessionUpdate = ({
   queue,
   modeStateRef,
   toolCallsRef,
+  thoughtSegmentRef,
+  availableCommandsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
   params,
@@ -852,6 +867,8 @@ const handleSessionUpdate = ({
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
+  readonly thoughtSegmentRef: Ref.Ref<AcpThoughtSegmentState>;
+  readonly availableCommandsRef: Ref.Ref<ReadonlyArray<AcpAvailableCommand>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
   readonly params: EffectAcpSchema.SessionNotification;
@@ -865,6 +882,9 @@ const handleSessionUpdate = ({
     }
     for (const event of parsed.events) {
       if (event._tag === "ToolCallUpdated") {
+        yield* Ref.update(thoughtSegmentRef, (current) =>
+          current.activeItemId ? { nextSegmentIndex: current.nextSegmentIndex } : current,
+        );
         yield* closeActiveAssistantSegment({
           queue,
           assistantSegmentRef,
@@ -897,6 +917,9 @@ const handleSessionUpdate = ({
             continue;
           }
         }
+        yield* Ref.update(thoughtSegmentRef, (current) =>
+          current.activeItemId ? { nextSegmentIndex: current.nextSegmentIndex } : current,
+        );
         const itemId = yield* ensureActiveAssistantSegment({
           queue,
           assistantSegmentRef,
@@ -908,6 +931,35 @@ const handleSessionUpdate = ({
           itemId,
         });
         continue;
+      }
+      if (event._tag === "ThoughtDelta") {
+        if (event.text.trim().length === 0) {
+          const thoughtSegmentState = yield* Ref.get(thoughtSegmentRef);
+          if (!thoughtSegmentState.activeItemId) {
+            continue;
+          }
+        }
+        const itemId = yield* Ref.modify(thoughtSegmentRef, (current) => {
+          if (current.activeItemId) {
+            return [current.activeItemId, current] as const;
+          }
+          const nextItemId = `reasoning:${params.sessionId}:runtime:${assistantItemRuntimeId}:segment:${current.nextSegmentIndex}`;
+          return [
+            nextItemId,
+            {
+              nextSegmentIndex: current.nextSegmentIndex + 1,
+              activeItemId: nextItemId,
+            } satisfies AcpThoughtSegmentState,
+          ] as const;
+        });
+        yield* Queue.offer(queue, {
+          ...event,
+          itemId,
+        });
+        continue;
+      }
+      if (event._tag === "AvailableCommandsChanged") {
+        yield* Ref.set(availableCommandsRef, event.commands);
       }
       yield* Queue.offer(queue, event);
     }

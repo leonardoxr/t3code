@@ -80,6 +80,12 @@ export interface AcpPermissionRequest {
   readonly toolCall?: AcpToolCallState;
 }
 
+export interface AcpAvailableCommand {
+  readonly name: string;
+  readonly description?: string;
+  readonly inputHint?: string;
+}
+
 export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ModeChanged";
@@ -107,6 +113,23 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ThoughtDelta";
+      readonly itemId?: string;
+      readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "AvailableCommandsChanged";
+      readonly commands: ReadonlyArray<AcpAvailableCommand>;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "UsageUpdated";
+      readonly usedTokens: number;
+      readonly maxTokens?: number;
       readonly rawPayload: unknown;
     };
 
@@ -574,8 +597,50 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       }
       break;
     }
-    default:
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ThoughtDelta",
+          text: upd.content.text,
+          rawPayload: params,
+        });
+      }
       break;
+    }
+    case "available_commands_update": {
+      events.push({
+        _tag: "AvailableCommandsChanged",
+        commands: upd.availableCommands.flatMap((command): Array<AcpAvailableCommand> => {
+          const name = command.name.trim();
+          if (!name) {
+            return [];
+          }
+          const description = command.description?.trim();
+          const inputHint = command.input?.hint?.trim();
+          return [
+            {
+              name,
+              ...(description ? { description } : {}),
+              ...(inputHint ? { inputHint } : {}),
+            },
+          ];
+        }),
+        rawPayload: params,
+      });
+      break;
+    }
+    case "usage_update": {
+      if (Number.isFinite(upd.used) && upd.used >= 0) {
+        events.push({
+          _tag: "UsageUpdated",
+          usedTokens: Math.round(upd.used),
+          ...(Number.isFinite(upd.size) && upd.size > 0 ? { maxTokens: Math.round(upd.size) } : {}),
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    default:
   }
 
   return { ...(modeId !== undefined ? { modeId } : {}), events };

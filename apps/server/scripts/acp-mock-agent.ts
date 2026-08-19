@@ -39,6 +39,8 @@ const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
+const emitThoughtChunk = process.env.T3_ACP_EMIT_THOUGHT_CHUNK === "1";
+const emitUsageUpdate = process.env.T3_ACP_EMIT_USAGE_UPDATE === "1";
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
 const permissionOptionIds = {
   allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
@@ -864,6 +866,27 @@ const program = Effect.gen(function* () {
           ],
         },
       });
+
+      if (emitThoughtChunk) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: "pondering the mock" },
+          },
+        });
+      }
+
+      if (emitUsageUpdate) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "usage_update",
+            used: 1234,
+            size: 8192,
+          },
+        });
+      }
 
       yield* agent.client.sessionUpdate({
         sessionId: requestedSessionId,

@@ -211,6 +211,15 @@ export const GrokIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
+export const OmpIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 24 24" fill="currentColor">
+    {/* Simplified single-color pi mark adapted from the oh-my-pi brand icon */}
+    <rect x="3" y="4" width="18" height="3" rx="1" />
+    <rect x="6" y="7" width="3" height="13" rx="1" />
+    <rect x="15" y="7" width="3" height="13" rx="1" />
+  </svg>
+);
+
 export const TraeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 24 24" fill="currentColor">
     {/* Back rectangle: left strip + bottom strip drawn separately — empty bottom-left corner is the gap between them */}

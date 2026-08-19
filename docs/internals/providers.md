@@ -7,7 +7,7 @@ orchestration layer does not know which one is behind a thread.
 
 ## Built-in drivers
 
-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five entries:
+[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with six entries:
 
 | Driver kind   | Driver source                           |
 | ------------- | --------------------------------------- |
@@ -15,6 +15,7 @@ orchestration layer does not know which one is behind a thread.
 | `claudeAgent` | [`Drivers/ClaudeDriver.ts`][claude]     |
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
+| `omp`         | [`Drivers/OmpDriver.ts`][omp]           |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
@@ -22,6 +23,10 @@ adapter in a child scope. Adapter implementations live beside them in
 `apps/server/src/provider/Layers/` (`CodexAdapter.ts`, `ClaudeAdapter.ts`, and so on) and conform to
 [`ProviderAdapter.ts`][adapter]. Read the driver plus its adapter to see how a specific agent's
 transport, config, and event shapes are mapped.
+
+The `omp` driver wraps the Oh My Pi CLI (`omp`, npm package `@oh-my-pi/pi-coding-agent`). It is
+ACP-based: the adapter spawns `omp acp` and speaks the Agent Client Protocol via
+`packages/effect-acp`.
 
 ## Registry and routing
 
@@ -80,6 +85,7 @@ when a request opens (approval) or user input is requested, via
 [claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
+[omp]: ../../apps/server/src/provider/Drivers/OmpDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts

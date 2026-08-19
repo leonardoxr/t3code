@@ -60,6 +60,7 @@ to use, then authenticate it.
 | Claude     | [Claude Code](https://claude.com/product/claude-code) | `claude`       | `claude auth login`   |
 | Cursor     | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
 | Grok Build | [Grok Build CLI](https://x.ai/cli)                    | `grok`         | `grok login`          |
+| Oh My Pi   | `bun i -g @oh-my-pi/pi-coding-agent` (or `npm i -g`)  | `omp`          | run `omp` once        |
 | OpenCode   | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
 
 Cursor is the one to watch: install Cursor CLI, which provides the `cursor-agent` binary that
@@ -67,6 +68,9 @@ T3 Code looks for, but authenticate with `agent login`, not `cursor-agent login`
 
 Run the login command on the machine running the T3 Code server, not on the device you browse
 from.
+
+Oh My Pi has no separate login command: run `omp` once in a terminal to configure provider
+credentials (stored under `~/.omp`).
 
 ### Binary Discovery
 
