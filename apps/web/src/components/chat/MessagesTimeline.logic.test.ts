@@ -690,6 +690,41 @@ describe("deriveMessagesTimelineRows", () => {
       }),
       expect.objectContaining({ kind: "work", id: "work-entry-1" }),
     ]);
+
+    // …and because the set records a deviation from that default, naming the
+    // turn in it collapses the fold instead of expanding it again. An effect
+    // that "kept the stopped turn open" by adding it here would hide the work.
+    const deviated = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "work-entry-1",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: {
+            id: "work-1",
+            createdAt: "2026-01-01T00:00:05Z",
+            turnId: "turn-1" as never,
+            label: "Ran command",
+            tone: "tool" as const,
+          },
+        },
+      ],
+      latestTurn: {
+        turnId: "turn-1" as never,
+        state: "interrupted",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:47Z",
+      },
+      expandedTurnIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(deviated).toEqual([
+      expect.objectContaining({ kind: "turn-fold", turnId: "turn-1", expanded: false }),
+    ]);
   });
 
   it("folds turns older than the latest, and reopens them on toggle", () => {

@@ -1763,20 +1763,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       ? props.latestTurn.turnId
       : null;
 
+  // A deviation the reader set on the latest turn belongs to that turn alone:
+  // once the next turn starts, the old one is history and folds at its default.
+  // An interrupted turn needs no entry here — it is still the latest turn, so
+  // its fold already defaults to open and its work stays on screen.
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestTurn;
-    if (!props.latestTurn || !previous) {
-      return;
-    }
-    if (props.latestTurn.turnId === previous.turnId) {
-      if (previous.state === "running" && props.latestTurn.state === "interrupted") {
-        const interruptedTurnId = props.latestTurn.turnId;
-        setInteractionState((current) => ({
-          ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(interruptedTurnId),
-        }));
-      }
+    if (!props.latestTurn || !previous || props.latestTurn.turnId === previous.turnId) {
       return;
     }
     setInteractionState((current) => {

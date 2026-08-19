@@ -377,23 +377,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [suspendEndScrollMaintenanceForDisclosure],
   );
 
-  // An in-session interrupt leaves its turn expanded so the user keeps their
-  // place; the next turn (or a reload, since this is local state) folds it.
+  // A deviation the reader set on the latest turn belongs to that turn alone:
+  // once the next turn starts, the old one is history and folds at its default.
+  // An interrupted turn needs no entry here — it is still the latest turn, so
+  // its fold already defaults to open and its work stays on screen.
   const previousLatestTurnRef = useRef(latestTurn);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = latestTurn;
-    if (!latestTurn || previous?.turnId === undefined) {
-      return;
-    }
-    if (latestTurn.turnId === previous.turnId) {
-      if (previous.state === "running" && latestTurn.state === "interrupted") {
-        setExpandedTurnIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestTurn.turnId);
-          return next;
-        });
-      }
+    if (!latestTurn || previous?.turnId === undefined || latestTurn.turnId === previous.turnId) {
       return;
     }
     setExpandedTurnIds((existing) => {
