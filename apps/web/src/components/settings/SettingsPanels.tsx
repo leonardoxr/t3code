@@ -1783,8 +1783,12 @@ export function GeneralSettingsPanel() {
   );
   const observability = useAtomValue(primaryServerObservabilityAtom);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const followUpOverrideShortcutLabel = useMemo(
-    () => shortcutLabelForCommand(keybindings, "composer.followUpOverride"),
+  const sendNowShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "composer.sendNow"),
+    [keybindings],
+  );
+  const queueFollowUpShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "composer.queueFollowUp"),
     [keybindings],
   );
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
@@ -2222,7 +2226,7 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           {...searchableSetting("follow-up-behavior")}
-          description={`Choose what sending does while a run is active: queue the message for when the agent goes idle, steer the current run with it, or interrupt the run and send it next. Press ${followUpOverrideShortcutLabel ?? "the override shortcut"} to do the opposite for one message.`}
+          description={`Choose what Enter does while a run is active: queue the message for when the agent goes idle, steer the current run with it, or interrupt the run and send it next. ${sendNowShortcutLabel ?? "The send-now shortcut"} always sends immediately and ${queueFollowUpShortcutLabel ?? "the queue shortcut"} always queues, whatever this is set to.`}
           resetAction={
             settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
               <SettingResetButton

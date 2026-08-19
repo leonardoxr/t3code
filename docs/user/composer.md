@@ -14,11 +14,11 @@ active:
   already doing, without starting a new turn.
 - **Interrupt** — stop the run and send the message next.
 
-`Cmd+Shift+Enter` (macOS) or `Ctrl+Shift+Enter` (Windows and Linux) does the **opposite** for one
-message, without changing the setting: it queues when your default sends immediately, and steers
-when your default is Queue. The button beside Stop performs the same one-off action and always shows
-which one it is, so the mode is visible without opening Settings. The shortcut is rebindable under
-**Settings** → **Keybindings** as `composer.followUpOverride`.
+`Cmd+Enter` (macOS) or `Ctrl+Enter` (Windows and Linux) always sends immediately, steering the
+running turn, and `Cmd+Shift+Enter` / `Ctrl+Shift+Enter` always queues — whatever the setting says.
+The button beside Stop performs whichever of the two `Enter` is not doing and names it, so the mode
+is visible without opening Settings. Both shortcuts are rebindable under **Settings** →
+**Keybindings** as `composer.sendNow` and `composer.queueFollowUp`.
 
 ## The follow-up queue
 
