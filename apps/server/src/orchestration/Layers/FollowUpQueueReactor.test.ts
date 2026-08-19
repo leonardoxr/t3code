@@ -172,6 +172,8 @@ interface GateScenario {
   thread: OrchestrationThread | null;
   shell: OrchestrationThreadShell;
   pendingTurnStart: boolean;
+  /** Completion stamp of the one turn `listByThreadId` reports, if any. */
+  completedTurnAt: string | null;
   events: ReadonlyArray<OrchestrationEvent>;
   promoteFails: boolean;
   dispatched: Array<OrchestrationCommand>;
@@ -182,6 +184,7 @@ const scenario: GateScenario = {
   thread: null,
   shell: makeShell({}),
   pendingTurnStart: false,
+  completedTurnAt: null,
   events: [SESSION_SET_EVENT],
   promoteFails: false,
   dispatched: [],
@@ -232,6 +235,19 @@ const turnRepositoryStub = {
           })
         : Option.none(),
     ),
+  listByThreadId: () =>
+    Effect.succeed(
+      scenario.completedTurnAt === null
+        ? []
+        : [
+            {
+              threadId: THREAD_ID,
+              turnId: TurnId.make("turn-1"),
+              state: "completed",
+              completedAt: scenario.completedTurnAt,
+            },
+          ],
+    ),
 } as unknown as ProjectionTurnRepository["Service"];
 
 const TestLayer = FollowUpQueueReactorLive.pipe(
@@ -244,6 +260,7 @@ const runGate = Effect.fn("runGate")(function* (input: {
   readonly thread: OrchestrationThread | null;
   readonly shell?: OrchestrationThreadShell;
   readonly pendingTurnStart?: boolean;
+  readonly completedTurnAt?: string | null;
   readonly events?: ReadonlyArray<OrchestrationEvent>;
   readonly promoteFails?: boolean;
 }) {
@@ -251,6 +268,7 @@ const runGate = Effect.fn("runGate")(function* (input: {
   scenario.thread = input.thread;
   scenario.shell = input.shell ?? makeShell({});
   scenario.pendingTurnStart = input.pendingTurnStart ?? false;
+  scenario.completedTurnAt = input.completedTurnAt ?? null;
   scenario.events = input.events ?? [SESSION_SET_EVENT];
   scenario.promoteFails = input.promoteFails ?? false;
   scenario.dispatched = [];
@@ -322,6 +340,35 @@ it.layer(TestLayer)("FollowUpQueueReactor dispatch gate", (it) => {
         pendingTurnStart: true,
       });
       expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("holds when the only completed turn predates the waiting turn start", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* runGate({
+        thread: makeThread({ queuedFollowUps: [makeFollowUp()], session: makeSession("ready") }),
+        pendingTurnStart: true,
+        completedTurnAt: "2025-12-31T23:59:00.000Z",
+      });
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("dispatches when a turn completed after the waiting turn start", () =>
+    Effect.gen(function* () {
+      // A steered send is folded into the running turn, so its turn start is
+      // never adopted and never cleared. Waiting on that ghost used to wedge
+      // the queue permanently — the follow-up sat there while the thread idled.
+      const dispatched = yield* runGate({
+        thread: makeThread({ queuedFollowUps: [makeFollowUp()], session: makeSession("ready") }),
+        pendingTurnStart: true,
+        completedTurnAt: "2026-01-01T00:05:00.000Z",
+      });
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({
+        type: "thread.follow-up.promote",
+        followUpId: FOLLOW_UP_ID,
+      });
     }),
   );
 
