@@ -12,6 +12,8 @@ import type {
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
+  OrchestrationGetActivityOutputInput,
+  OrchestrationGetActivityOutputResult,
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
@@ -104,6 +106,18 @@ export interface ProjectionSnapshotQueryShape {
   readonly searchThreads: (
     input: OrchestrationSearchThreadsInput,
   ) => Effect.Effect<OrchestrationSearchThreadsResult, ProjectionRepositoryError>;
+
+  /**
+   * Read the expanded-row body of one activity: the output its tool printed
+   * and any inline diffs it reported.
+   *
+   * Thread payloads carry only summaries, so clients fetch this for the single
+   * row a user expands. A pruned or unknown activity reads as an empty body
+   * rather than an error — the row falls back to the summary it already shows.
+   */
+  readonly getActivityOutput: (
+    input: OrchestrationGetActivityOutputInput,
+  ) => Effect.Effect<OrchestrationGetActivityOutputResult, ProjectionRepositoryError>;
 
   /**
    * Read the latest projection snapshot sequence without hydrating read-model

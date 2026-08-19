@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   CheckpointRef,
   IsoDateTime,
+  EventId,
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
@@ -45,6 +46,7 @@ import {
 } from "../../persistence/Errors.ts";
 import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { extractActivityOutput } from "../ActivityPayloadProjection.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
@@ -146,6 +148,10 @@ const ProjectIdLookupInput = Schema.Struct({
 });
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
+});
+const ActivityLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  activityId: EventId,
 });
 // Windowed reads order turns by the stable keyset (anchor, turn key), where
 // anchor is requested_at and turn key is
@@ -1112,6 +1118,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sequence ASC,
           created_at ASC,
           activity_id ASC
+      `,
+  });
+
+  // `activity_id` is the table's primary key; `thread_id` is in the predicate so
+  // a client cannot read another thread's activity by guessing an id.
+  const getActivityRowById = SqlSchema.findOneOption({
+    Request: ActivityLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, activityId }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE activity_id = ${activityId}
+          AND thread_id = ${threadId}
+        LIMIT 1
       `,
   });
 
@@ -2386,6 +2416,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     };
   });
 
+  const getActivityOutput: ProjectionSnapshotQueryShape["getActivityOutput"] = Effect.fn(
+    "ProjectionSnapshotQuery.getActivityOutput",
+  )(function* (input) {
+    const row = yield* getActivityRowById(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getActivityOutput:query",
+          "ProjectionSnapshotQuery.getActivityOutput:decodeRow",
+        ),
+      ),
+    );
+    return Option.match(row, {
+      onNone: () => ({ text: null, truncated: false, diffs: [] }),
+      onSome: (activity) => extractActivityOutput(activity.payload),
+    });
+  });
+
   const getActiveProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getActiveProjectByWorkspaceRoot"] =
     (workspaceRoot) =>
       getActiveProjectRowByWorkspaceRoot({ workspaceRoot }).pipe(
@@ -2928,6 +2975,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getShellSnapshot,
     getArchivedShellSnapshot,
     searchThreads,
+    getActivityOutput,
     getSnapshotSequence,
     getCounts,
     getActiveProjectByWorkspaceRoot,

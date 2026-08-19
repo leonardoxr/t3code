@@ -1686,7 +1686,7 @@ describe("deriveWorkLogEntries rich tool payloads", () => {
     });
   });
 
-  it("propagates fullText, diffs, and toolInfo from completed tool payloads", () => {
+  it("keeps toolInfo and ignores output a payload should no longer carry", () => {
     const [entry] = deriveWorkLogEntries([
       makeActivity({
         id: "tool-rich",
@@ -1697,11 +1697,7 @@ describe("deriveWorkLogEntries rich tool payloads", () => {
           data: {
             toolCallId: "tool-rich-1",
             rawOutput: { content: "one line", fullText: "line one\nline two\nline three" },
-            diffs: [
-              { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
-              { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
-              { path: "/tmp/bad.ts", oldText: "x" },
-            ],
+            diffs: [{ path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" }],
             toolInfo: {
               name: "lsp",
               action: "definition",
@@ -1713,11 +1709,10 @@ describe("deriveWorkLogEntries rich tool payloads", () => {
         turnId: "turn-1",
       }),
     ]);
-    expect(entry?.fullOutputText).toBe("line one\nline two\nline three");
-    expect(entry?.diffs).toEqual([
-      { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
-      { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
-    ]);
+    // Output and diffs belong to `orchestration.getActivityOutput`, which an
+    // expanded row fetches; a work-log entry only carries row chrome.
+    expect(entry).not.toHaveProperty("fullOutputText");
+    expect(entry).not.toHaveProperty("diffs");
     expect(entry?.toolInfo).toEqual({
       name: "lsp",
       action: "definition",

@@ -47,6 +47,7 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
+import { useActivityOutput } from "../../state/queries";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -2119,7 +2120,7 @@ function workEntryRawCommand(
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
-  options?: { omitFullOutput?: boolean },
+  options?: { fullOutputText?: string; omitFullOutput?: boolean },
 ): string | null {
   const blocks: string[] = [];
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
@@ -2143,9 +2144,10 @@ function buildToolCallExpandedBody(
   } else if (workEntry.command?.trim()) {
     blocks.push(workEntry.command.trim());
   }
-  // The capped multi-line output supersedes the one-line detail summary.
-  if (workEntry.fullOutputText?.trim() && !options?.omitFullOutput) {
-    blocks.push(workEntry.fullOutputText.trim());
+  // Fetched output supersedes the one-line detail summary, which is also what
+  // the row shows while that fetch is still in flight.
+  if (options?.fullOutputText?.trim() && !options.omitFullOutput) {
+    blocks.push(options.fullOutputText.trim());
   } else if (workEntry.detail?.trim()) {
     blocks.push(workEntry.detail.trim());
   }
@@ -2430,22 +2432,32 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const reasoningText = workEntry.reasoningText;
   const toolCode = workEntry.toolInfo?.code;
+  // Output and diffs are not on the wire — a tool row asks for its own body the
+  // first time it is expanded, and the query caches it per activity.
+  const output = useActivityOutput({
+    environmentId: ctx.activeThreadEnvironmentId,
+    threadId: rowThreadId,
+    activityId: workEntry.id,
+    enabled: expanded && reasoningText === undefined && workLogEntryIsToolLike(workEntry),
+  });
+  const fullOutputText = output.data?.text ?? undefined;
+  const diffs = output.data?.diffs;
   // LSP results are markdown (hover docs, fenced signatures); render them
   // through ChatMarkdown instead of the monospace <pre>.
-  const renderResultAsMarkdown =
-    workEntry.toolInfo?.name === "lsp" && workEntry.fullOutputText !== undefined;
+  const renderResultAsMarkdown = workEntry.toolInfo?.name === "lsp" && fullOutputText !== undefined;
   const expandedBody = reasoningText
     ? null
     : buildToolCallExpandedBody(workEntry, workspaceRoot, {
+        ...(fullOutputText !== undefined ? { fullOutputText } : {}),
         omitFullOutput: renderResultAsMarkdown,
       });
-  // Diffs render lazily: metadata is only computed once the row expands.
-  const hasDiffs = (workEntry.diffs?.length ?? 0) > 0;
+  const hasDiffs = (diffs?.length ?? 0) > 0;
   const canExpand =
     expandedBody !== null ||
     hasDiffs ||
     toolCode !== undefined ||
     renderResultAsMarkdown ||
+    workLogEntryIsToolLike(workEntry) ||
     (reasoningText !== undefined && reasoningText !== workEntry.label);
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
@@ -2603,18 +2615,18 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
               {expandedBody ? (
                 <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
               ) : null}
-              {renderResultAsMarkdown && workEntry.fullOutputText ? (
+              {renderResultAsMarkdown && fullOutputText ? (
                 <ChatMarkdown
-                  text={workEntry.fullOutputText}
+                  text={fullOutputText}
                   cwd={ctx.markdownCwd}
                   threadRef={ctx.threadRef ?? undefined}
                   skills={ctx.skills}
                   className="mt-1 text-secondary-label text-[12px]"
                 />
               ) : null}
-              {hasDiffs ? (
+              {diffs && diffs.length > 0 ? (
                 <WorkEntryDiffSection
-                  diffs={workEntry.diffs!}
+                  diffs={diffs}
                   resolvedTheme={ctx.resolvedTheme}
                   workspaceRoot={workspaceRoot}
                 />

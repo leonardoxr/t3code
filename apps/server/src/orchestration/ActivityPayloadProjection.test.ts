@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationThreadActivity } from "@t3tools/contracts";
-import { projectActivityPayload } from "./ActivityPayloadProjection.ts";
+import { extractActivityOutput, projectActivityPayload } from "./ActivityPayloadProjection.ts";
 
 function activity(
   payload: Record<string, unknown>,
@@ -53,7 +53,7 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(data.somethingClientNeverReads).toBeUndefined();
   });
 
-  it("keeps a bounded Codex command output summary plus capped full text", () => {
+  it("keeps a bounded Codex command output summary and nothing else", () => {
     const projected = projectActivityPayload(
       activity({
         itemType: "command_execution",
@@ -70,14 +70,12 @@ describe("projectActivityPayload agent-field survival", () => {
       command: "/bin/zsh -lc 'printf hello'",
       aggregatedOutput: "hello from codex",
     });
-    const rawOutput = data.rawOutput as Record<string, unknown>;
-    expect(rawOutput.fullText).toContain("hello from codex");
-    expect(rawOutput.fullText).toContain("⋯ output truncated ⋯");
-    // Full text is capped, so the wire payload stays bounded.
-    expect(JSON.stringify(projected.payload).length).toBeLessThan(4_700);
+    // The 5000-char body stays in persistence for the expanded row to fetch.
+    expect(JSON.stringify(projected.payload)).not.toContain("xxxx");
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(300);
   });
 
-  it("keeps in-flight tool.updated rows slim (no full text, no diffs)", () => {
+  it("keeps in-flight tool.updated rows slim", () => {
     const projected = projectActivityPayload(
       activity(
         {
@@ -99,39 +97,22 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 
-  it("preserves ACP diff content blocks on completed tools", () => {
+  it("leaves ACP diff content blocks off the wire on completed tools", () => {
     const projected = projectActivityPayload(
       activity({
         itemType: "file_change",
         data: {
           content: [
             { type: "diff", path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
-            { type: "diff", path: "/tmp/new.ts", oldText: null, newText: "export {};" },
-            { type: "diff", path: "/tmp/huge.ts", oldText: "x".repeat(30_000), newText: "y" },
             { type: "content", content: { type: "text", text: "wrote 2 files" } },
           ],
         },
       }),
     );
     const data = projectedData(projected);
-    expect(data.diffs).toEqual([
-      { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
-      { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
-    ]);
-  });
-
-  it("omits fullText when the output is a single short line", () => {
-    const projected = projectActivityPayload(
-      activity({
-        itemType: "command_execution",
-        data: {
-          command: "printf hello",
-          rawOutput: { stdout: "hello" },
-        },
-      }),
-    );
-    const data = projectedData(projected);
-    expect(data.rawOutput).toEqual({ content: "hello" });
+    expect(data.diffs).toBeUndefined();
+    // The row still knows which files changed, so it still offers to expand.
+    expect(data.files).toEqual([{ path: "/tmp/a.ts" }]);
   });
 
   it("derives compact toolInfo from xd device writes and eval args", () => {
@@ -202,16 +183,12 @@ describe("projectActivityPayload agent-field survival", () => {
       }),
     );
 
-    const claudeData = projectedData(claude);
-    const acpData = projectedData(acp);
-    const claudeRawOutput = claudeData.rawOutput as Record<string, unknown>;
-    const acpRawOutput = acpData.rawOutput as Record<string, unknown>;
-    expect(claudeRawOutput.content).toBe("hello from claude");
-    expect(acpRawOutput.content).toBe("hello from acp");
-    expect(claudeRawOutput.fullText).toContain("hello from claude");
-    expect(acpRawOutput.fullText).toContain("hello from acp");
-    expect(JSON.stringify(claude.payload).length).toBeLessThan(4_700);
-    expect(JSON.stringify(acp.payload).length).toBeLessThan(4_700);
+    const claudeRawOutput = projectedData(claude).rawOutput as Record<string, unknown>;
+    const acpRawOutput = projectedData(acp).rawOutput as Record<string, unknown>;
+    expect(claudeRawOutput).toEqual({ content: "hello from claude" });
+    expect(acpRawOutput).toEqual({ content: "hello from acp" });
+    expect(JSON.stringify(claude.payload).length).toBeLessThan(300);
+    expect(JSON.stringify(acp.payload).length).toBeLessThan(300);
   });
 
   it("slims Codex-shaped mcp_tool_call items to rendered fields plus a result summary", () => {
@@ -243,9 +220,8 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(item.arguments).toEqual({ pr: 42 });
     expect(item._meta).toBeUndefined();
     expect(item.result).toEqual({ content: "PR body line one" });
-    const rawOutput = data.rawOutput as Record<string, unknown>;
-    expect(rawOutput.fullText).toContain("PR body line one");
-    expect(JSON.stringify(projected.payload).length).toBeLessThan(4_700);
+    expect(data.rawOutput).toBeUndefined();
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(400);
   });
 
   it("slims Claude-shaped mcp_tool_call data (toolName/input/result block)", () => {
@@ -267,7 +243,7 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(data.toolName).toBe("mcp__github__fetch_pr");
     expect(data.input).toEqual({ pr: 42 });
     expect(data.result).toEqual({ content: "first line of output" });
-    expect(JSON.stringify(projected.payload).length).toBeLessThan(4_700);
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(400);
   });
 
   it("passes task lifecycle payloads (no data field) through untouched", () => {
@@ -285,5 +261,87 @@ describe("projectActivityPayload agent-field survival", () => {
     });
     const projected = projectActivityPayload(source);
     expect(projected.payload).toEqual(source.payload);
+  });
+});
+
+describe("extractActivityOutput", () => {
+  it("returns the uncapped Codex output the wire payload summarized away", () => {
+    const output = extractActivityOutput({
+      itemType: "command_execution",
+      data: {
+        item: {
+          command: "/bin/zsh -lc 'printf hello'",
+          aggregatedOutput: `hello from codex\n${"x".repeat(5000)}`,
+        },
+      },
+    });
+    expect(output.text).toContain("hello from codex");
+    expect(output.text).toContain("x".repeat(5000));
+    expect(output.truncated).toBe(false);
+    expect(output.diffs).toEqual([]);
+  });
+
+  it("reads Claude, ACP, and MCP result shapes", () => {
+    expect(
+      extractActivityOutput({
+        itemType: "command_execution",
+        data: { rawOutput: { stdout: "hello from claude\nsecond line" } },
+      }).text,
+    ).toBe("hello from claude\nsecond line");
+    expect(
+      extractActivityOutput({
+        itemType: "command_execution",
+        data: {
+          content: [{ type: "content", content: { type: "text", text: "hello from acp\nmore" } }],
+        },
+      }).text,
+    ).toBe("hello from acp\nmore");
+    expect(
+      extractActivityOutput({
+        itemType: "mcp_tool_call",
+        data: { item: { result: { content: [{ type: "text", text: "PR body\nline two" }] } } },
+      }).text,
+    ).toBe("PR body\nline two");
+  });
+
+  it("returns diffs a completed file-change tool reported, dropping oversized sides", () => {
+    const output = extractActivityOutput({
+      itemType: "file_change",
+      data: {
+        content: [
+          { type: "diff", path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+          { type: "diff", path: "/tmp/new.ts", oldText: null, newText: "export {};" },
+          { type: "diff", path: "/tmp/huge.ts", oldText: "x".repeat(30_000), newText: "y" },
+        ],
+      },
+    });
+    expect(output.diffs).toEqual([
+      { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+      { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
+    ]);
+  });
+
+  it("caps a runaway body and says so", () => {
+    const output = extractActivityOutput({
+      itemType: "command_execution",
+      data: { rawOutput: { stdout: `first line\n${"y".repeat(400_000)}` } },
+    });
+    expect(output.truncated).toBe(true);
+    expect(output.text).toContain("⋯ output truncated ⋯");
+    expect(output.text!.length).toBeLessThan(200_100);
+  });
+
+  it("says nothing when the output adds nothing to the row's summary", () => {
+    expect(
+      extractActivityOutput({
+        itemType: "command_execution",
+        data: { command: "printf hello", rawOutput: { stdout: "hello" } },
+      }),
+    ).toEqual({ text: null, truncated: false, diffs: [] });
+    expect(extractActivityOutput({ taskId: "task-9" })).toEqual({
+      text: null,
+      truncated: false,
+      diffs: [],
+    });
   });
 });

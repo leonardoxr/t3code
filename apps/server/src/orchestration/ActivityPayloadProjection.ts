@@ -1,5 +1,7 @@
 import type {
+  OrchestrationActivityOutputDiff,
   OrchestrationEvent,
+  OrchestrationGetActivityOutputResult,
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
@@ -69,6 +71,10 @@ function collectChangedFiles(
     "patch",
     "patches",
     "operations",
+    // ACP reports file changes as `content: [{type: "diff", path, ...}]`. The
+    // diff bodies stay off the wire, so this path list is all a collapsed row
+    // has to name the files a tool touched.
+    "content",
   ]) {
     if (!(nestedKey in record)) {
       continue;
@@ -145,21 +151,20 @@ function summarizeToolTextOutput(value: string): string | null {
 }
 
 /**
- * Cap for the multi-line output retained on `tool.completed` wire payloads.
- * The one-line summary still drives collapsed previews; this bounded head+tail
- * feeds the expanded work-log row so real output is inspectable without
- * shipping unbounded tool results.
+ * Cap for the output text served to an expanded row. Generous: this text is
+ * fetched for ONE activity a user asked to see, never broadcast with a thread,
+ * so the only thing it has to stay under is a single reasonable WS frame.
  */
-const FULL_OUTPUT_TEXT_LIMIT = 4_000;
+const ACTIVITY_OUTPUT_TEXT_LIMIT = 200_000;
 
-function capFullText(value: string): string {
-  if (value.length <= FULL_OUTPUT_TEXT_LIMIT) {
-    return value;
+function capActivityOutputText(value: string): { text: string; truncated: boolean } {
+  if (value.length <= ACTIVITY_OUTPUT_TEXT_LIMIT) {
+    return { text: value, truncated: false };
   }
-  const half = FULL_OUTPUT_TEXT_LIMIT / 2;
+  const half = ACTIVITY_OUTPUT_TEXT_LIMIT / 2;
   const head = value.slice(0, half).trimEnd();
   const tail = value.slice(-half).trimStart();
-  return `${head}\n⋯ output truncated ⋯\n${tail}`;
+  return { text: `${head}\n⋯ output truncated ⋯\n${tail}`, truncated: true };
 }
 
 function extractAcpContentText(value: unknown): string | undefined {
@@ -224,15 +229,15 @@ const DIFF_FILE_LIMIT = 6;
 const DIFF_TEXT_LIMIT = 20_000;
 
 /**
- * Preserves ACP `{type: "diff", path, oldText, newText}` content blocks on
- * completed file-change tools so clients can render inline per-file diffs.
- * Oversized sides are dropped rather than truncated — a clipped diff lies.
+ * Reads ACP `{type: "diff", path, oldText, newText}` content blocks so an
+ * expanded row can render inline per-file diffs. Oversized sides are dropped
+ * rather than truncated — a clipped diff lies.
  */
-function projectDiffContent(value: unknown): Array<Record<string, unknown>> | undefined {
+function extractDiffContent(value: unknown): Array<OrchestrationActivityOutputDiff> {
   if (!Array.isArray(value)) {
-    return undefined;
+    return [];
   }
-  const diffs: Array<Record<string, unknown>> = [];
+  const diffs: Array<OrchestrationActivityOutputDiff> = [];
   for (const entryValue of value) {
     const entry = asRecord(entryValue);
     if (entry?.type !== "diff") {
@@ -251,7 +256,7 @@ function projectDiffContent(value: unknown): Array<Record<string, unknown>> | un
       break;
     }
   }
-  return diffs.length > 0 ? diffs : undefined;
+  return diffs;
 }
 
 const TOOL_INFO_ARG_LIMIT = 10;
@@ -422,12 +427,10 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
  * MCP tool calls carry full tool results (`data.item.result` on Codex,
  * `data.result` on Claude/OpenCode) that used to bypass slimming entirely to
  * keep the expanded-row UI working. Keep the fields the UI actually renders
- * and summarize the result like regular tool output.
+ * and summarize the result like regular tool output; the full result is served
+ * by `extractActivityOutput` when a row is expanded.
  */
-function projectMcpToolCallData(
-  data: Record<string, unknown>,
-  keepFullOutput: boolean,
-): Record<string, unknown> {
+function projectMcpToolCallData(data: Record<string, unknown>): Record<string, unknown> {
   const projectedData: Record<string, unknown> = {};
 
   const item = asRecord(data.item);
@@ -469,13 +472,6 @@ function projectMcpToolCallData(
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
   if (changedFiles.length > 0) {
     projectedData.files = changedFiles.map((path) => ({ path }));
-  }
-
-  if (keepFullOutput) {
-    const fullText = extractMcpResultText(item ? item.result : data.result);
-    if (fullText && fullTextAddsInformation(fullText.trim())) {
-      projectedData.rawOutput = { fullText: capFullText(fullText.trim()) };
-    }
   }
 
   return projectedData;
@@ -543,6 +539,11 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
 /**
  * Removes activity payload fields that no current client reads while retaining
  * the full payload in persistence and the event store.
+ *
+ * Every row leaves here summary-sized. Tool output and inline diffs are NOT
+ * broadcast: a client fetches them for the one row a user expands, through
+ * `extractActivityOutput`, so a thread's wire cost does not grow with the bytes
+ * its tools happened to print.
  */
 export function projectActivityPayload(
   activity: OrchestrationThreadActivity,
@@ -553,18 +554,12 @@ export function projectActivityPayload(
     return activity;
   }
 
-  // Terminal rows keep richer payloads: the collapsed preview still uses the
-  // one-line summaries, but the expanded row can show real output and inline
-  // diffs. In-flight `tool.updated` rows stay slim — they are superseded and
-  // persisting them fat would write O(N²) bytes per call.
-  const keepFullOutput = activity.kind === "tool.completed";
-
   if (payload.itemType === "mcp_tool_call") {
     return {
       ...activity,
       payload: {
         ...payload,
-        data: projectMcpToolCallData(data, keepFullOutput),
+        data: projectMcpToolCallData(data),
       },
     };
   }
@@ -598,18 +593,8 @@ export function projectActivityPayload(
   }
 
   const rawOutput = projectRawOutput(data.rawOutput) ?? projectAcpContent(data.content);
-  const fullText = keepFullOutput ? fullToolOutputText(data) : undefined;
-  if (fullText && fullTextAddsInformation(fullText)) {
-    projectedData.rawOutput = { ...(rawOutput ?? {}), fullText: capFullText(fullText) };
-  } else if (rawOutput) {
+  if (rawOutput) {
     projectedData.rawOutput = rawOutput;
-  }
-
-  if (keepFullOutput) {
-    const diffs = projectDiffContent(data.content);
-    if (diffs) {
-      projectedData.diffs = diffs;
-    }
   }
 
   return {
@@ -618,6 +603,38 @@ export function projectActivityPayload(
       ...payload,
       data: projectedData,
     },
+  };
+}
+
+/**
+ * Expanded-row body for ONE persisted activity payload: the output text the
+ * tool printed plus any inline diffs it reported.
+ *
+ * Reads the same adapter shapes `projectActivityPayload` summarizes, so the
+ * fetched body and the collapsed summary always describe the same output. Text
+ * that adds nothing to that summary (a single short line) comes back as null —
+ * the row already shows it.
+ */
+export function extractActivityOutput(payload: unknown): OrchestrationGetActivityOutputResult {
+  const record = asRecord(payload);
+  const data = asRecord(record?.data);
+  if (!data) {
+    return { text: null, truncated: false, diffs: [] };
+  }
+
+  const item = asRecord(data.item);
+  const rawText =
+    record?.itemType === "mcp_tool_call"
+      ? extractMcpResultText(item ? item.result : data.result)
+      : fullToolOutputText(data);
+  const trimmed = rawText?.trim();
+  const capped =
+    trimmed && fullTextAddsInformation(trimmed) ? capActivityOutputText(trimmed) : undefined;
+
+  return {
+    text: capped?.text ?? null,
+    truncated: capped?.truncated ?? false,
+    diffs: extractDiffContent(data.content),
   };
 }
 

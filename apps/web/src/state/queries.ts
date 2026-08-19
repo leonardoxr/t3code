@@ -18,6 +18,7 @@ import type {
   VcsListRefsResult,
   VcsRef,
 } from "@t3tools/contracts";
+import { EventId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -386,4 +387,32 @@ export function useCheckpointDiff(
     turnTarget === null ? null : orchestrationEnvironment.turnDiff(turnTarget),
   );
   return fullThreadTarget === null ? turn : fullThread;
+}
+
+/**
+ * Body of one expanded tool row: the output the tool printed and its inline
+ * diffs, which threads no longer carry on the wire.
+ *
+ * Disabled (null target) until a row is actually expanded, and cached per
+ * activity id, so scrolling a virtualized row out and back does not refetch.
+ */
+export function useActivityOutput(target: {
+  readonly environmentId: EnvironmentId | null;
+  readonly threadId: ThreadId | null;
+  readonly activityId: string | null;
+  readonly enabled: boolean;
+}) {
+  const atomTarget =
+    target.enabled &&
+    target.environmentId !== null &&
+    target.threadId !== null &&
+    target.activityId !== null
+      ? {
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId, activityId: EventId.make(target.activityId) },
+        }
+      : null;
+  return useEnvironmentQuery(
+    atomTarget === null ? null : orchestrationEnvironment.activityOutput(atomTarget),
+  );
 }
