@@ -21,7 +21,9 @@ import {
   type ProviderUserInputAnswers,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -90,6 +92,7 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonStri
 const PROVIDER = ProviderDriverKind.make("omp");
 const OMP_RESUME_VERSION = 1 as const;
 const ACP_PLAN_MODE_ALIASES = ["plan"];
+const OMP_REASONING_TEXT_LIMIT = 8_000;
 const ACP_IMPLEMENT_MODE_ALIASES = ["default", "code", "agent", "implement"];
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
@@ -127,6 +130,22 @@ interface OmpSessionContext {
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
+  /** Streaming thought segment: omp emits agent_thought_chunk deltas with a
+   * per-segment item id; the buffer settles into a `reasoning` item when the
+   * segment ends (other work starts, the id changes, or the prompt settles). */
+  reasoningItemId: string | undefined;
+  reasoningText: string;
+  /**
+   * Subtask roster per task-tool call id. Populated on the first frame (the
+   * only one carrying `rawInput`); later async ticks lose their merge state
+   * once the runtime evicts the completed call, so this map is the identity
+   * source for post-ack progress.
+   */
+  readonly taskToolSubtasks: Map<string, ReadonlyArray<OmpTaskToolSubtask>>;
+  /** Last emitted progress fingerprint per `${toolCallId}:${subtaskIndex}`. */
+  readonly taskProgressFingerprints: Map<string, string>;
+  /** Subtasks whose terminal task.completed already went out. */
+  readonly completedTaskIds: Set<string>;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
@@ -353,6 +372,220 @@ export function enrichOmpToolCallFiles(toolCall: AcpToolCallState): AcpToolCallS
   };
 }
 
+export interface OmpTaskToolSubtask {
+  readonly taskId: string;
+  readonly title: string;
+  readonly role?: string;
+  readonly description: string;
+}
+
+/**
+ * Recognizes omp's subagent `task` tool from its args shape — a `context`
+ * string plus a `tasks` array of `{task, name?, agent?}` records — and maps
+ * each subtask to a stable task id derived from the tool call. Subagent
+ * lifecycle never crosses the ACP wire, so these synthesized entries are the
+ * only way the Agents surface lights up for omp.
+ */
+export function parseOmpTaskToolCall(
+  toolCall: AcpToolCallState,
+): ReadonlyArray<OmpTaskToolSubtask> | undefined {
+  const rawInput = toolCall.data.rawInput;
+  if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+    return undefined;
+  }
+  if (!("context" in rawInput) || typeof rawInput.context !== "string") {
+    return undefined;
+  }
+  if (!("tasks" in rawInput) || !Array.isArray(rawInput.tasks)) {
+    return undefined;
+  }
+  const subtasks: OmpTaskToolSubtask[] = [];
+  for (const [index, taskValue] of rawInput.tasks.entries()) {
+    if (typeof taskValue !== "object" || taskValue === null || Array.isArray(taskValue)) {
+      continue;
+    }
+    const description =
+      "task" in taskValue && typeof taskValue.task === "string" ? taskValue.task.trim() : "";
+    if (description.length === 0) {
+      continue;
+    }
+    const name =
+      "name" in taskValue && typeof taskValue.name === "string" ? taskValue.name.trim() : "";
+    const agent =
+      "agent" in taskValue && typeof taskValue.agent === "string" ? taskValue.agent.trim() : "";
+    const firstLine = description.split("\n", 1)[0]?.trim() ?? description;
+    subtasks.push({
+      taskId: `${toolCall.toolCallId}:${index}`,
+      title:
+        name.length > 0 ? name : firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine,
+      ...(agent.length > 0 ? { role: agent } : {}),
+      description,
+    });
+  }
+  return subtasks.length > 0 ? subtasks : undefined;
+}
+
+const OMP_TASK_STATUS_MAP: Record<
+  string,
+  "pending" | "running" | "completed" | "failed" | "cancelled"
+> = {
+  pending: "pending",
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  aborted: "cancelled",
+};
+
+export interface OmpTaskProgressSnapshot {
+  readonly index: number;
+  readonly status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  readonly lastIntent?: string;
+  readonly currentTool?: string;
+  readonly toolCount?: number;
+  readonly tokens?: number;
+  readonly durationMs?: number;
+  readonly resolvedModel?: string;
+}
+
+function ompTaskDetails(toolCall: AcpToolCallState): Record<string, unknown> | undefined {
+  const rawOutput = toolCall.data.rawOutput;
+  if (typeof rawOutput !== "object" || rawOutput === null || !("details" in rawOutput)) {
+    return undefined;
+  }
+  const details = rawOutput.details;
+  return typeof details === "object" && details !== null && !Array.isArray(details)
+    ? (details as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readCount(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : undefined;
+}
+
+/**
+ * Live per-subagent progress from the task tool's streaming `rawOutput.details.progress`
+ * (`AgentProgress[]` in omp). This is the same data omp's RPC-only
+ * `subagent_progress` frames carry — over ACP it rides the tool update.
+ */
+export function parseOmpTaskToolProgress(
+  toolCall: AcpToolCallState,
+): ReadonlyArray<OmpTaskProgressSnapshot> | undefined {
+  const details = ompTaskDetails(toolCall);
+  if (!details || !Array.isArray(details.progress)) {
+    return undefined;
+  }
+  const snapshots: OmpTaskProgressSnapshot[] = [];
+  for (const entryValue of details.progress) {
+    if (typeof entryValue !== "object" || entryValue === null || Array.isArray(entryValue)) {
+      continue;
+    }
+    const entry = entryValue as Record<string, unknown>;
+    const index = readCount(entry, "index");
+    const status = OMP_TASK_STATUS_MAP[readString(entry, "status") ?? ""];
+    if (index === undefined || status === undefined) {
+      continue;
+    }
+    const lastIntent = readString(entry, "lastIntent");
+    const currentTool = readString(entry, "currentTool");
+    const toolCount = readCount(entry, "toolCount");
+    const tokens = readCount(entry, "tokens");
+    const durationMs = readCount(entry, "durationMs");
+    const resolvedModel = readString(entry, "resolvedModel");
+    snapshots.push({
+      index,
+      status,
+      ...(lastIntent !== undefined ? { lastIntent } : {}),
+      ...(currentTool !== undefined ? { currentTool } : {}),
+      ...(toolCount !== undefined ? { toolCount } : {}),
+      ...(tokens !== undefined ? { tokens } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(resolvedModel !== undefined ? { resolvedModel } : {}),
+    });
+  }
+  return snapshots.length > 0 ? snapshots : undefined;
+}
+
+export interface OmpTaskResultSnapshot {
+  readonly index: number;
+  readonly status: "completed" | "failed" | "stopped";
+  readonly summary?: string;
+  readonly tokens?: number;
+  readonly durationMs?: number;
+  readonly resolvedModel?: string;
+}
+
+/** Terminal per-subagent outcomes from the task tool's final `rawOutput.details.results`. */
+export function parseOmpTaskToolResults(
+  toolCall: AcpToolCallState,
+): ReadonlyArray<OmpTaskResultSnapshot> | undefined {
+  const details = ompTaskDetails(toolCall);
+  if (!details || !Array.isArray(details.results)) {
+    return undefined;
+  }
+  const results: OmpTaskResultSnapshot[] = [];
+  for (const entryValue of details.results) {
+    if (typeof entryValue !== "object" || entryValue === null || Array.isArray(entryValue)) {
+      continue;
+    }
+    const entry = entryValue as Record<string, unknown>;
+    const index = readCount(entry, "index");
+    if (index === undefined) {
+      continue;
+    }
+    const error = readString(entry, "error");
+    const exitCode = typeof entry.exitCode === "number" ? entry.exitCode : 0;
+    const aborted = entry.aborted === true;
+    const status = aborted
+      ? "stopped"
+      : error !== undefined || exitCode !== 0
+        ? "failed"
+        : "completed";
+    const output = readString(entry, "output");
+    const summarySource = error ?? output;
+    const firstLine = summarySource?.split("\n", 1)[0]?.trim();
+    const tokens = readCount(entry, "tokens");
+    const durationMs = readCount(entry, "durationMs");
+    const resolvedModel = readString(entry, "resolvedModel");
+    results.push({
+      index,
+      status,
+      ...(firstLine ? { summary: firstLine } : {}),
+      ...(tokens !== undefined ? { tokens } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(resolvedModel !== undefined ? { resolvedModel } : {}),
+    });
+  }
+  return results.length > 0 ? results : undefined;
+}
+
+/**
+ * The task tool's async-job mode acks the tool call as "completed" while
+ * subagents are still running; the job state rides in `details.async`.
+ * Callers must not treat the call status as subtask completion while this
+ * reports "running".
+ */
+export function parseOmpTaskAsyncState(
+  toolCall: AcpToolCallState,
+): "running" | "completed" | "failed" | undefined {
+  const details = ompTaskDetails(toolCall);
+  const asyncValue = details?.async;
+  if (typeof asyncValue !== "object" || asyncValue === null || Array.isArray(asyncValue)) {
+    return undefined;
+  }
+  // Guarded record read; the shape is omp's TaskToolDetails.async.
+  const asyncRecord = asyncValue as Record<string, unknown>;
+  const state = readString(asyncRecord, "state");
+  return state === "running" || state === "completed" || state === "failed" ? state : undefined;
+}
+
 export function ompPromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
@@ -435,6 +668,206 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
 
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+
+    /**
+     * Settles the buffered thinking segment as a completed `reasoning` item so
+     * ingestion can append a "Thought" activity. Nothing on the ACP wire marks
+     * a thought segment's end, so callers flush when other work starts, the
+     * segment id changes, or the prompt settles.
+     */
+    const flushReasoningBuffer = (ctx: OmpSessionContext, turnId: TurnId | undefined) =>
+      Effect.gen(function* () {
+        const text = ctx.reasoningText.trim();
+        const itemId = ctx.reasoningItemId;
+        ctx.reasoningItemId = undefined;
+        ctx.reasoningText = "";
+        if (text.length === 0 || turnId === undefined) {
+          return;
+        }
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "item.completed",
+          ...stamp,
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          itemId: RuntimeItemId.make(itemId ?? `reasoning:${stamp.eventId}`),
+          payload: {
+            itemType: "reasoning",
+            status: "completed",
+            data: {
+              text:
+                text.length > OMP_REASONING_TEXT_LIMIT
+                  ? `${text.slice(0, OMP_REASONING_TEXT_LIMIT).trimEnd()}…`
+                  : text,
+            },
+          },
+        });
+      });
+
+    /**
+     * Synthesizes subagent lifecycle from omp's `task` tool call. ACP carries
+     * no subagent frames — the roster rides in the call's streaming
+     * `rawOutput.details`. Async-job mode acks the CALL as completed while
+     * agents still run, so per-subtask terminality comes from the streamed
+     * `progress[].status`, never from the call status alone.
+     */
+    const emitTaskToolLifecycle = (
+      ctx: OmpSessionContext,
+      turnId: TurnId,
+      toolCall: AcpToolCallState,
+      subtasks: ReadonlyArray<OmpTaskToolSubtask>,
+    ) =>
+      Effect.gen(function* () {
+        if (!ctx.taskToolSubtasks.has(toolCall.toolCallId)) {
+          ctx.taskToolSubtasks.set(toolCall.toolCallId, subtasks);
+          for (const subtask of subtasks) {
+            yield* offerRuntimeEvent({
+              type: "task.started",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              turnId,
+              payload: {
+                taskId: RuntimeTaskId.make(subtask.taskId),
+                description: subtask.description,
+                agentKind: "agent",
+                title: subtask.title,
+                ...(subtask.role !== undefined ? { role: subtask.role } : {}),
+                toolUseId: toolCall.toolCallId,
+              },
+            });
+          }
+        }
+
+        const taskLinkage = (subtask: OmpTaskToolSubtask) =>
+          ({
+            agentKind: "agent",
+            title: subtask.title,
+            ...(subtask.role !== undefined ? { role: subtask.role } : {}),
+            toolUseId: toolCall.toolCallId,
+          }) as const;
+
+        const snapshots = parseOmpTaskToolProgress(toolCall) ?? [];
+        for (const snapshot of snapshots) {
+          const subtask = subtasks[snapshot.index];
+          if (!subtask || ctx.completedTaskIds.has(subtask.taskId)) {
+            continue;
+          }
+          const typedUsage =
+            snapshot.tokens !== undefined
+              ? {
+                  typedUsage: {
+                    totalTokens: snapshot.tokens,
+                    ...(snapshot.toolCount !== undefined ? { toolUses: snapshot.toolCount } : {}),
+                    ...(snapshot.durationMs !== undefined
+                      ? { durationMs: snapshot.durationMs }
+                      : {}),
+                  },
+                }
+              : {};
+          if (
+            snapshot.status === "completed" ||
+            snapshot.status === "failed" ||
+            snapshot.status === "cancelled"
+          ) {
+            ctx.completedTaskIds.add(subtask.taskId);
+            yield* offerRuntimeEvent({
+              type: "task.completed",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              turnId,
+              payload: {
+                taskId: RuntimeTaskId.make(subtask.taskId),
+                status: snapshot.status === "cancelled" ? "stopped" : snapshot.status,
+                ...(snapshot.lastIntent !== undefined ? { summary: snapshot.lastIntent } : {}),
+                ...typedUsage,
+                ...(snapshot.resolvedModel !== undefined ? { model: snapshot.resolvedModel } : {}),
+                ...taskLinkage(subtask),
+              },
+            });
+            continue;
+          }
+          // One progress event per observable change — omp re-sends the whole
+          // roster on every tick, so a fingerprint keeps the event stream (and
+          // persisted activities) proportional to real work.
+          const fingerprintKey = `${toolCall.toolCallId}:${snapshot.index}`;
+          const fingerprint = [
+            snapshot.status,
+            snapshot.toolCount ?? "",
+            snapshot.currentTool ?? "",
+            snapshot.lastIntent ?? "",
+          ].join("\u001f");
+          if (ctx.taskProgressFingerprints.get(fingerprintKey) === fingerprint) {
+            continue;
+          }
+          ctx.taskProgressFingerprints.set(fingerprintKey, fingerprint);
+          yield* offerRuntimeEvent({
+            type: "task.progress",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            payload: {
+              taskId: RuntimeTaskId.make(subtask.taskId),
+              description: snapshot.lastIntent ?? subtask.title,
+              ...(snapshot.lastIntent !== undefined ? { summary: snapshot.lastIntent } : {}),
+              ...(snapshot.currentTool !== undefined ? { lastToolName: snapshot.currentTool } : {}),
+              status: snapshot.status,
+              ...typedUsage,
+              ...(snapshot.resolvedModel !== undefined ? { model: snapshot.resolvedModel } : {}),
+              ...taskLinkage(subtask),
+            },
+          });
+        }
+
+        // The call itself settling only closes subtasks when the roster is
+        // truly done: sync-mode results, or a non-running async job. An
+        // async-mode ack (job still running) keeps rows live for later ticks.
+        const asyncState = parseOmpTaskAsyncState(toolCall);
+        const callTerminal =
+          (toolCall.status === "completed" || toolCall.status === "failed") &&
+          asyncState !== "running";
+        if (!callTerminal) {
+          return;
+        }
+        const results = parseOmpTaskToolResults(toolCall);
+        for (const [index, subtask] of subtasks.entries()) {
+          if (ctx.completedTaskIds.has(subtask.taskId)) {
+            continue;
+          }
+          const result = results?.find((entry) => entry.index === index);
+          if (!result && asyncState !== undefined) {
+            // Async job without a per-subtask outcome yet — completion will
+            // arrive via a later progress tick.
+            continue;
+          }
+          ctx.completedTaskIds.add(subtask.taskId);
+          yield* offerRuntimeEvent({
+            type: "task.completed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            payload: {
+              taskId: RuntimeTaskId.make(subtask.taskId),
+              status: result?.status ?? (toolCall.status === "failed" ? "failed" : "completed"),
+              ...(result?.summary !== undefined ? { summary: result.summary } : {}),
+              ...(result?.tokens !== undefined
+                ? {
+                    typedUsage: {
+                      totalTokens: result.tokens,
+                      ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+                    },
+                  }
+                : {}),
+              ...(result?.resolvedModel !== undefined ? { model: result.resolvedModel } : {}),
+              ...taskLinkage(subtask),
+            },
+          });
+        }
+      });
 
     const settlePromptInFlight = (
       threadId: ThreadId,
@@ -530,6 +963,35 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             return;
           }
           liveCtx.promptsInFlight = remainingPrompts;
+        }
+        // The turn is settling: surface any trailing thought segment before
+        // the terminal event so its activity lands inside the turn.
+        yield* flushReasoningBuffer(liveCtx, settleTurnId);
+        // Async task jobs can outlive the turn inside omp, but the wire can
+        // no longer update their rows once the turn is gone — mark them
+        // backgrounded instead of leaving a live "working" state behind.
+        for (const [toolCallId, subtasks] of liveCtx.taskToolSubtasks) {
+          for (const subtask of subtasks) {
+            if (liveCtx.completedTaskIds.has(subtask.taskId)) {
+              continue;
+            }
+            yield* offerRuntimeEvent({
+              type: "task.updated",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId,
+              turnId: settleTurnId,
+              payload: {
+                taskId: RuntimeTaskId.make(subtask.taskId),
+                status: "idle",
+                isBackgrounded: true,
+                agentKind: "agent",
+                title: subtask.title,
+                ...(subtask.role !== undefined ? { role: subtask.role } : {}),
+                toolUseId: toolCallId,
+              },
+            });
+          }
         }
         const updatedAt = yield* nowIso;
         const canEmitTurnCompletion =
@@ -712,6 +1174,10 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           });
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          // Shared with the session context below: the suppression override
+          // must recognize post-ack async ticks whose merge state (and thus
+          // rawInput) the runtime already evicted.
+          const taskToolSubtasks = new Map<string, ReadonlyArray<OmpTaskToolSubtask>>();
           const acp = yield* makeOmpAcpRuntime({
             ompSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
@@ -720,6 +1186,11 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             advertiseElicitation: true,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
+            // Task-tool progress rides in rawOutput with an unchanged title;
+            // without this the default gate drops every live subagent update.
+            shouldEmitSuppressedToolCallUpdate: (previous, next) =>
+              (taskToolSubtasks.has(next.toolCallId) || parseOmpTaskToolCall(next) !== undefined) &&
+              previous?.data.rawOutput !== next.data.rawOutput,
             ...(mcpSession
               ? {
                   mcpServers: [
@@ -922,6 +1393,11 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             pendingUserInputs,
             turns: [],
             lastPlanFingerprint: undefined,
+            reasoningItemId: undefined,
+            reasoningText: "",
+            taskToolSubtasks,
+            taskProgressFingerprints: new Map(),
+            completedTaskIds: new Set(),
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
@@ -975,6 +1451,13 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 }
                 const stamp = yield* makeEventStamp();
 
+                // Any non-thought notification means the thinking segment is
+                // over; settle it first so the "Thought" row precedes the work
+                // it led to.
+                if (event._tag !== "ThoughtDelta" && ctx.reasoningText.length > 0) {
+                  yield* flushReasoningBuffer(ctx, notificationTurnId);
+                }
+
                 switch (event._tag) {
                   case "AssistantItemStarted":
                     yield* offerRuntimeEvent(
@@ -1010,7 +1493,21 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       "session/update",
                     );
                     return;
-                  case "ToolCallUpdated":
+                  case "ToolCallUpdated": {
+                    // omp's subagent `task` tool renders as the Agents
+                    // surface (spawn CTA + panel), not a generic tool row.
+                    const taskSubtasks =
+                      ctx.taskToolSubtasks.get(event.toolCall.toolCallId) ??
+                      parseOmpTaskToolCall(event.toolCall);
+                    if (taskSubtasks) {
+                      yield* emitTaskToolLifecycle(
+                        ctx,
+                        notificationTurnId,
+                        event.toolCall,
+                        taskSubtasks,
+                      );
+                      return;
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -1022,6 +1519,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       }),
                     );
                     return;
+                  }
                   case "ContentDelta":
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
@@ -1036,6 +1534,17 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                     );
                     return;
                   case "ThoughtDelta":
+                    if (
+                      ctx.reasoningItemId !== undefined &&
+                      event.itemId !== undefined &&
+                      event.itemId !== ctx.reasoningItemId
+                    ) {
+                      yield* flushReasoningBuffer(ctx, notificationTurnId);
+                    }
+                    if (event.itemId !== undefined) {
+                      ctx.reasoningItemId = event.itemId;
+                    }
+                    ctx.reasoningText += event.text;
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp,
@@ -1204,6 +1713,15 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               }
               if (steeringTurnId === undefined) {
                 ctx.lastPlanFingerprint = undefined;
+                // A fresh turn must not inherit a stale thought segment from
+                // an interrupted predecessor.
+                ctx.reasoningItemId = undefined;
+                ctx.reasoningText = "";
+                // Task bookkeeping is per-turn: a fresh turn's task tool calls
+                // get new ids, and stale entries would only leak.
+                ctx.taskToolSubtasks.clear();
+                ctx.taskProgressFingerprints.clear();
+                ctx.completedTaskIds.clear();
               }
               ctx.session = {
                 ...ctx.session,

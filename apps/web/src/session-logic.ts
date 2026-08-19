@@ -67,6 +67,21 @@ export type WorkLogToolLifecycleStatus =
   | "declined"
   | "stopped";
 
+/** Inline per-file diff preserved from ACP tool content on `tool.completed`. */
+export interface WorkLogDiff {
+  path: string;
+  oldText: string | null;
+  newText: string;
+}
+
+/** Compact tool identity from the wire (`data.toolInfo`): device/tool name, action verb, scalar args, inline code. */
+export interface WorkLogToolInfo {
+  name?: string;
+  action?: string;
+  args?: Readonly<Record<string, string | number | boolean>>;
+  code?: { language: string; text: string };
+}
+
 export interface WorkLogEntry {
   id: string;
   createdAt: string;
@@ -100,6 +115,14 @@ export interface WorkLogEntry {
     workflowId: string | null;
     agentTaskIds: ReadonlyArray<string>;
   };
+  /** Full thought text for `reasoning.completed` rows (markdown-ish). */
+  reasoningText?: string;
+  /** Capped multi-line tool output from `data.rawOutput.fullText` (expanded body). */
+  fullOutputText?: string;
+  /** Inline diffs from `data.diffs` on completed file-change tools. */
+  diffs?: ReadonlyArray<WorkLogDiff>;
+  /** Tool identity/args for per-tool row chrome and expanded rendering. */
+  toolInfo?: WorkLogToolInfo;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -285,6 +308,11 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
   // task.progress (tone "thinking") and the neutral filter was swallowing
   // them exactly while the fleet ran — the one moment they matter most.
   if (entry.agentSpawn !== undefined) {
+    return false;
+  }
+  // Thought rows have no success/failure semantics; hiding them as "empty"
+  // would drop the thinking trace entirely.
+  if (entry.reasoningText !== undefined) {
     return false;
   }
   if (!workLogEntryIsToolLike(entry)) {
@@ -844,7 +872,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     turnId: activity.turnId,
     label: taskLabel || activity.summary,
     tone:
-      activity.kind === "task.progress"
+      activity.kind === "task.progress" || activity.kind === "reasoning.completed"
         ? "thinking"
         : activity.tone === "approval"
           ? "info"
@@ -882,6 +910,25 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (toolCallId) {
     entry.toolCallId = toolCallId;
+  }
+  if (activity.kind === "reasoning.completed") {
+    const reasoningText = asTrimmedString(payload?.text);
+    if (reasoningText) {
+      entry.reasoningText = reasoningText;
+    }
+  }
+  const toolPayloadData = asRecord(payload?.data);
+  const fullOutputText = asTrimmedString(asRecord(toolPayloadData?.rawOutput)?.fullText);
+  if (fullOutputText) {
+    entry.fullOutputText = fullOutputText;
+  }
+  const diffs = extractWorkLogDiffs(toolPayloadData?.diffs);
+  if (diffs) {
+    entry.diffs = diffs;
+  }
+  const toolInfo = extractWorkLogToolInfo(toolPayloadData?.toolInfo);
+  if (toolInfo) {
+    entry.toolInfo = toolInfo;
   }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
@@ -1323,6 +1370,65 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
   return asTrimmedString(data?.toolCallId);
+}
+
+function extractWorkLogDiffs(value: unknown): ReadonlyArray<WorkLogDiff> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const diffs: WorkLogDiff[] = [];
+  for (const entryValue of value) {
+    const entry = asRecord(entryValue);
+    const path = asTrimmedString(entry?.path);
+    if (!entry || !path || typeof entry.newText !== "string") {
+      continue;
+    }
+    diffs.push({
+      path,
+      oldText: typeof entry.oldText === "string" ? entry.oldText : null,
+      newText: entry.newText,
+    });
+  }
+  return diffs.length > 0 ? diffs : undefined;
+}
+
+function extractWorkLogToolInfo(value: unknown): WorkLogToolInfo | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const name = asTrimmedString(record.name);
+  const action = asTrimmedString(record.action);
+
+  let args: Record<string, string | number | boolean> | undefined;
+  const argsRecord = asRecord(record.args);
+  if (argsRecord) {
+    for (const [key, argValue] of Object.entries(argsRecord)) {
+      if (
+        typeof argValue === "string" ||
+        (typeof argValue === "number" && Number.isFinite(argValue)) ||
+        typeof argValue === "boolean"
+      ) {
+        (args ??= {})[key] = argValue;
+      }
+    }
+  }
+
+  const codeRecord = asRecord(record.code);
+  const codeText = asTrimmedString(codeRecord?.text);
+  const code = codeText
+    ? { language: asTrimmedString(codeRecord?.language) ?? "text", text: codeText }
+    : undefined;
+
+  if (!name && !action && !args && !code) {
+    return undefined;
+  }
+  return {
+    ...(name ? { name } : {}),
+    ...(action ? { action } : {}),
+    ...(args ? { args } : {}),
+    ...(code ? { code } : {}),
+  };
 }
 
 function normalizeInlinePreview(value: string): string {

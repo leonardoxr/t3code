@@ -818,6 +818,33 @@ export function runtimeEventToActivities(
     }
 
     case "item.completed": {
+      // A completed reasoning item becomes a "Thought" row: the full text
+      // rides in the payload (bounded by the adapter) so clients can render
+      // it expanded, while the summary carries the first line for the
+      // collapsed row.
+      if (event.payload.itemType === "reasoning") {
+        const data = event.payload.data;
+        const dataText =
+          typeof data === "object" && data !== null && "text" in data ? data.text : undefined;
+        const text = (
+          typeof dataText === "string" ? dataText : (event.payload.detail ?? "")
+        ).trim();
+        if (text.length === 0) {
+          return [];
+        }
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: "info",
+            kind: "reasoning.completed",
+            summary: truncateDetail(text.split("\n", 1)[0] ?? "Thought", 120),
+            payload: { text },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }

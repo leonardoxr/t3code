@@ -31,6 +31,9 @@ import {
   enrichOmpToolCallFiles,
   makeOmpAdapter,
   ompPromptSettlementBelongsToContext,
+  parseOmpTaskToolCall,
+  parseOmpTaskToolProgress,
+  parseOmpTaskToolResults,
   resolveOmpRequestedModeId,
 } from "./OmpAdapter.ts";
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
@@ -200,6 +203,145 @@ it("enrichOmpToolCallFiles surfaces edit locations as a files list", () => {
   assert.strictEqual(enrichOmpToolCallFiles(readCall), readCall);
   const bareEdit = { toolCallId: "tool-3", kind: "edit", data: { toolCallId: "tool-3" } };
   assert.strictEqual(enrichOmpToolCallFiles(bareEdit), bareEdit);
+});
+
+it("parseOmpTaskToolCall maps subagent task tool args to synthesized subtasks", () => {
+  const subtasks = parseOmpTaskToolCall({
+    toolCallId: "tool-task-1",
+    kind: "other",
+    data: {
+      toolCallId: "tool-task-1",
+      rawInput: {
+        context: "# Goal\nMigrate the settings screens.",
+        tasks: [
+          { name: "AuthScreen", agent: "coder", task: "Migrate the auth screen.\nDetails…" },
+          { task: "Review the auth screen migration for regressions." },
+          { agent: "scout" },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(subtasks, [
+    {
+      taskId: "tool-task-1:0",
+      title: "AuthScreen",
+      role: "coder",
+      description: "Migrate the auth screen.\nDetails…",
+    },
+    {
+      taskId: "tool-task-1:1",
+      title: "Review the auth screen migration for regressions.",
+      description: "Review the auth screen migration for regressions.",
+    },
+  ]);
+
+  // Non-task tools with similar-looking args never synthesize subtasks.
+  assert.isUndefined(
+    parseOmpTaskToolCall({
+      toolCallId: "tool-x",
+      kind: "execute",
+      data: { toolCallId: "tool-x", rawInput: { command: "ls" } },
+    }),
+  );
+  assert.isUndefined(
+    parseOmpTaskToolCall({
+      toolCallId: "tool-y",
+      kind: "other",
+      data: { toolCallId: "tool-y", rawInput: { context: "ctx", tasks: [] } },
+    }),
+  );
+});
+
+it("parseOmpTaskToolProgress and parseOmpTaskToolResults read streamed task details", () => {
+  const baseCall = {
+    toolCallId: "tool-task-2",
+    kind: "other",
+    data: {
+      toolCallId: "tool-task-2",
+      rawInput: {
+        context: "ctx",
+        tasks: [{ name: "Scout", agent: "scout", task: "Map the module." }],
+      },
+    },
+  };
+
+  const progress = parseOmpTaskToolProgress({
+    ...baseCall,
+    status: "inProgress",
+    data: {
+      ...baseCall.data,
+      rawOutput: {
+        details: {
+          progress: [
+            {
+              index: 0,
+              id: "sub-1",
+              agent: "scout",
+              status: "running",
+              task: "Map the module.",
+              lastIntent: "Reading adapter entry points",
+              currentTool: "grep",
+              toolCount: 7,
+              tokens: 15_320.4,
+              durationMs: 42_000,
+              resolvedModel: "anthropic/claude-sonnet-4-5",
+            },
+            { index: 3, status: "sideways" },
+          ],
+        },
+      },
+    },
+  });
+  assert.deepEqual(progress, [
+    {
+      index: 0,
+      status: "running",
+      lastIntent: "Reading adapter entry points",
+      currentTool: "grep",
+      toolCount: 7,
+      tokens: 15320,
+      durationMs: 42000,
+      resolvedModel: "anthropic/claude-sonnet-4-5",
+    },
+  ]);
+
+  const results = parseOmpTaskToolResults({
+    ...baseCall,
+    status: "completed",
+    data: {
+      ...baseCall.data,
+      rawOutput: {
+        details: {
+          results: [
+            {
+              index: 0,
+              exitCode: 0,
+              output: "Report ready.\nDetails follow…",
+              tokens: 90_000,
+              durationMs: 61_000,
+            },
+            { index: 1, exitCode: 1, output: "", error: "budget exhausted" },
+            { index: 2, exitCode: 0, output: "n/a", aborted: true },
+          ],
+        },
+      },
+    },
+  });
+  assert.deepEqual(results, [
+    {
+      index: 0,
+      status: "completed",
+      summary: "Report ready.",
+      tokens: 90000,
+      durationMs: 61000,
+    },
+    { index: 1, status: "failed", summary: "budget exhausted" },
+    { index: 2, status: "stopped", summary: "n/a" },
+  ]);
+
+  // No details on the wire → no synthesized frames.
+  assert.isUndefined(parseOmpTaskToolProgress(baseCall));
+  assert.isUndefined(parseOmpTaskToolResults(baseCall));
 });
 
 it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
@@ -583,6 +725,28 @@ it.layer(ompAdapterTestLayer)("OmpAdapterLive", (it) => {
       assert.isTrue(String(reasoningDelta?.itemId ?? "").startsWith("reasoning:"));
       assert.equal(assistantDelta?.payload.delta, "hello from mock");
       assert.notEqual(String(reasoningDelta?.itemId), String(assistantDelta?.itemId));
+
+      // The buffered thought settles as a completed reasoning item once the
+      // assistant message starts, carrying the full text for the chat row.
+      const reasoningItem = runtimeEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "item.completed" }> =>
+          event.type === "item.completed" &&
+          typeof event.payload === "object" &&
+          event.payload !== null &&
+          "itemType" in event.payload &&
+          event.payload.itemType === "reasoning",
+      );
+      assert.isDefined(reasoningItem);
+      const reasoningData =
+        reasoningItem?.payload.data &&
+        typeof reasoningItem.payload.data === "object" &&
+        "text" in reasoningItem.payload.data
+          ? reasoningItem.payload.data.text
+          : undefined;
+      assert.equal(reasoningData, "pondering the mock");
+      const reasoningItemIndex = runtimeEvents.findIndex((event) => event === reasoningItem);
+      const assistantDeltaIndex = runtimeEvents.findIndex((event) => event === assistantDelta);
+      assert.isBelow(reasoningItemIndex, assistantDeltaIndex);
 
       yield* adapter.stopSession(threadId);
     }),

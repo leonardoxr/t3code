@@ -145,6 +145,225 @@ function summarizeToolTextOutput(value: string): string | null {
 }
 
 /**
+ * Cap for the multi-line output retained on `tool.completed` wire payloads.
+ * The one-line summary still drives collapsed previews; this bounded head+tail
+ * feeds the expanded work-log row so real output is inspectable without
+ * shipping unbounded tool results.
+ */
+const FULL_OUTPUT_TEXT_LIMIT = 4_000;
+
+function capFullText(value: string): string {
+  if (value.length <= FULL_OUTPUT_TEXT_LIMIT) {
+    return value;
+  }
+  const half = FULL_OUTPUT_TEXT_LIMIT / 2;
+  const head = value.slice(0, half).trimEnd();
+  const tail = value.slice(-half).trimStart();
+  return `${head}\n⋯ output truncated ⋯\n${tail}`;
+}
+
+function extractAcpContentText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const texts: string[] = [];
+  for (const entryValue of value) {
+    const entry = asRecord(entryValue);
+    const content = asRecord(entry?.content);
+    if (entry?.type === "content" && content?.type === "text") {
+      const text = asTrimmedString(content.text);
+      if (text) {
+        texts.push(text);
+      }
+    }
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
+/**
+ * Full renderable text of a tool result, across the payload shapes adapters
+ * emit: ACP `rawOutput` (string | {content|stdout|stderr}), ACP `content`
+ * blocks, and Codex/Claude item shapes.
+ */
+function fullToolOutputText(data: Record<string, unknown>): string | undefined {
+  const direct = asTrimmedString(data.rawOutput);
+  if (direct) {
+    return direct;
+  }
+  const rawOutput = asRecord(data.rawOutput);
+  if (rawOutput) {
+    const content = asTrimmedString(rawOutput.content);
+    if (content) {
+      return content;
+    }
+    const streams = [asTrimmedString(rawOutput.stdout), asTrimmedString(rawOutput.stderr)].filter(
+      (value): value is string => value !== null,
+    );
+    if (streams.length > 0) {
+      return streams.join("\n");
+    }
+  }
+  const acpText = extractAcpContentText(data.content);
+  if (acpText) {
+    return acpText;
+  }
+  const item = asRecord(data.item);
+  const aggregatedOutput = asTrimmedString(item?.aggregatedOutput);
+  if (aggregatedOutput) {
+    return aggregatedOutput;
+  }
+  return asTrimmedString(asRecord(item?.result)?.content) ?? undefined;
+}
+
+/** True when the full text carries more than its one-line summary. */
+function fullTextAddsInformation(fullText: string): boolean {
+  return fullText.includes("\n") || fullText.length > 84;
+}
+
+const DIFF_FILE_LIMIT = 6;
+const DIFF_TEXT_LIMIT = 20_000;
+
+/**
+ * Preserves ACP `{type: "diff", path, oldText, newText}` content blocks on
+ * completed file-change tools so clients can render inline per-file diffs.
+ * Oversized sides are dropped rather than truncated — a clipped diff lies.
+ */
+function projectDiffContent(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const diffs: Array<Record<string, unknown>> = [];
+  for (const entryValue of value) {
+    const entry = asRecord(entryValue);
+    if (entry?.type !== "diff") {
+      continue;
+    }
+    const path = asTrimmedString(entry.path);
+    if (!path || typeof entry.newText !== "string") {
+      continue;
+    }
+    const oldText = typeof entry.oldText === "string" ? entry.oldText : null;
+    if (entry.newText.length > DIFF_TEXT_LIMIT || (oldText?.length ?? 0) > DIFF_TEXT_LIMIT) {
+      continue;
+    }
+    diffs.push({ path, oldText, newText: entry.newText });
+    if (diffs.length >= DIFF_FILE_LIMIT) {
+      break;
+    }
+  }
+  return diffs.length > 0 ? diffs : undefined;
+}
+
+const TOOL_INFO_ARG_LIMIT = 10;
+const TOOL_INFO_STRING_LIMIT = 160;
+const TOOL_INFO_CODE_LIMIT = 2_000;
+/** Arg keys whose values are bulky payloads already surfaced elsewhere (command line, output, diffs). */
+const TOOL_INFO_SKIPPED_ARG_KEYS = new Set([
+  "code",
+  "content",
+  "command",
+  "cmd",
+  "input",
+  "text",
+  "task",
+  "tasks",
+  "context",
+  "prompt",
+  "i",
+  "action",
+  "op",
+]);
+
+function truncateToolInfoString(value: string): string {
+  return value.length > TOOL_INFO_STRING_LIMIT
+    ? `${value.slice(0, TOOL_INFO_STRING_LIMIT - 1).trimEnd()}…`
+    : value;
+}
+
+/**
+ * Compact, bounded tool identity derived from `rawInput` for the expanded
+ * work-log row: device/tool name (omp mounts lsp/debug/browser/ast_edit as
+ * `xd://<name>` device writes), the action verb, scalar args, and inline
+ * code (eval). rawInput itself never ships — this is its renderable shadow.
+ */
+function projectToolInfo(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  const rawInput = asRecord(data.rawInput);
+  if (!rawInput) {
+    return undefined;
+  }
+
+  let name: string | undefined;
+  let argsSource = rawInput;
+  const path = asTrimmedString(rawInput.path);
+  const deviceMatch = path ? /^xd:\/\/([a-z0-9_-]+)/iu.exec(path) : null;
+  if (deviceMatch?.[1]) {
+    name = deviceMatch[1].toLowerCase();
+    const content = asTrimmedString(rawInput.content);
+    if (content) {
+      try {
+        const parsed: unknown = JSON.parse(content);
+        const parsedRecord = asRecord(parsed);
+        if (parsedRecord) {
+          argsSource = parsedRecord;
+        }
+      } catch {
+        // Non-JSON device payloads keep the outer args.
+      }
+    }
+  }
+
+  const action = asTrimmedString(argsSource.action) ?? asTrimmedString(argsSource.op) ?? undefined;
+
+  const args: Record<string, string | number | boolean> = {};
+  let argCount = 0;
+  for (const [key, value] of Object.entries(argsSource)) {
+    if (TOOL_INFO_SKIPPED_ARG_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      args[key] = truncateToolInfoString(trimmed);
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      args[key] = value;
+    } else if (typeof value === "boolean") {
+      args[key] = value;
+    } else {
+      continue;
+    }
+    argCount += 1;
+    if (argCount >= TOOL_INFO_ARG_LIMIT) {
+      break;
+    }
+  }
+
+  const codeText = typeof argsSource.code === "string" ? argsSource.code.trim() : "";
+  const code =
+    codeText.length > 0
+      ? {
+          language:
+            asTrimmedString(argsSource.language) ?? asTrimmedString(argsSource.lang) ?? "text",
+          text:
+            codeText.length > TOOL_INFO_CODE_LIMIT
+              ? `${codeText.slice(0, TOOL_INFO_CODE_LIMIT).trimEnd()}\n⋯`
+              : codeText,
+        }
+      : undefined;
+
+  if (!name && !action && argCount === 0 && !code) {
+    return undefined;
+  }
+  return {
+    ...(name ? { name } : {}),
+    ...(action ? { action } : {}),
+    ...(argCount > 0 ? { args } : {}),
+    ...(code ? { code } : {}),
+  };
+}
+
+/**
  * Fields of an MCP tool-call item both clients render in the expanded
  * work-log row. Everything else — notably `result`, which carries the full
  * tool output and dominates wire size on MCP-heavy threads — is summarized
@@ -205,7 +424,10 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
  * keep the expanded-row UI working. Keep the fields the UI actually renders
  * and summarize the result like regular tool output.
  */
-function projectMcpToolCallData(data: Record<string, unknown>): Record<string, unknown> {
+function projectMcpToolCallData(
+  data: Record<string, unknown>,
+  keepFullOutput: boolean,
+): Record<string, unknown> {
   const projectedData: Record<string, unknown> = {};
 
   const item = asRecord(data.item);
@@ -247,6 +469,13 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
   if (changedFiles.length > 0) {
     projectedData.files = changedFiles.map((path) => ({ path }));
+  }
+
+  if (keepFullOutput) {
+    const fullText = extractMcpResultText(item ? item.result : data.result);
+    if (fullText && fullTextAddsInformation(fullText.trim())) {
+      projectedData.rawOutput = { fullText: capFullText(fullText.trim()) };
+    }
   }
 
   return projectedData;
@@ -324,12 +553,18 @@ export function projectActivityPayload(
     return activity;
   }
 
+  // Terminal rows keep richer payloads: the collapsed preview still uses the
+  // one-line summaries, but the expanded row can show real output and inline
+  // diffs. In-flight `tool.updated` rows stay slim — they are superseded and
+  // persisting them fat would write O(N²) bytes per call.
+  const keepFullOutput = activity.kind === "tool.completed";
+
   if (payload.itemType === "mcp_tool_call") {
     return {
       ...activity,
       payload: {
         ...payload,
-        data: projectMcpToolCallData(data),
+        data: projectMcpToolCallData(data, keepFullOutput),
       },
     };
   }
@@ -357,9 +592,24 @@ export function projectActivityPayload(
     projectedData.kind = data.kind;
   }
 
+  const toolInfo = projectToolInfo(data);
+  if (toolInfo) {
+    projectedData.toolInfo = toolInfo;
+  }
+
   const rawOutput = projectRawOutput(data.rawOutput) ?? projectAcpContent(data.content);
-  if (rawOutput) {
+  const fullText = keepFullOutput ? fullToolOutputText(data) : undefined;
+  if (fullText && fullTextAddsInformation(fullText)) {
+    projectedData.rawOutput = { ...(rawOutput ?? {}), fullText: capFullText(fullText) };
+  } else if (rawOutput) {
     projectedData.rawOutput = rawOutput;
+  }
+
+  if (keepFullOutput) {
+    const diffs = projectDiffContent(data.content);
+    if (diffs) {
+      projectedData.diffs = diffs;
+    }
   }
 
   return {

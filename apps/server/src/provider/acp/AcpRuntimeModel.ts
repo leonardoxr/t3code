@@ -391,10 +391,15 @@ function makeToolCallState(
       })
     : undefined;
   const status = normalizeToolCallStatus(input.status, options?.fallbackStatus);
+  // A bare "Tool" summary is the no-information fallback (updates carry no
+  // title/kind on the wire). Emitting it would let mergeToolCallState
+  // overwrite the informative title the tool_call start derived.
+  const presentationTitle =
+    presentation?.summary && presentation.summary !== "Tool" ? presentation.summary : undefined;
   return {
     toolCallId,
     ...(kind ? { kind } : {}),
-    ...(presentation?.summary ? { title: presentation.summary } : {}),
+    ...(presentationTitle ? { title: presentationTitle } : {}),
     ...(status ? { status } : {}),
     ...(command ? { command } : {}),
     ...(presentation?.detail ? { detail: presentation.detail } : {}),

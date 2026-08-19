@@ -1609,6 +1609,68 @@ describe("deriveWorkLogEntries context window handling", () => {
   });
 });
 
+describe("deriveWorkLogEntries rich tool payloads", () => {
+  it("maps reasoning.completed activities to thinking rows with the full text", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "thought-1",
+        kind: "reasoning.completed",
+        summary: "The projection drops diffs.",
+        tone: "info",
+        payload: { text: "The projection drops diffs.\nKeep them on tool.completed." },
+        turnId: "turn-1",
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "thought-1",
+      tone: "thinking",
+      label: "The projection drops diffs.",
+      reasoningText: "The projection drops diffs.\nKeep them on tool.completed.",
+    });
+  });
+
+  it("propagates fullText, diffs, and toolInfo from completed tool payloads", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "tool-rich",
+        kind: "tool.completed",
+        summary: "Reading wire projection",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            toolCallId: "tool-rich-1",
+            rawOutput: { content: "one line", fullText: "line one\nline two\nline three" },
+            diffs: [
+              { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+              { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
+              { path: "/tmp/bad.ts", oldText: "x" },
+            ],
+            toolInfo: {
+              name: "lsp",
+              action: "definition",
+              args: { file: "src/foo.ts", line: 42, drop: { nested: true } },
+              code: { language: "py", text: "print(1)" },
+            },
+          },
+        },
+        turnId: "turn-1",
+      }),
+    ]);
+    expect(entry?.fullOutputText).toBe("line one\nline two\nline three");
+    expect(entry?.diffs).toEqual([
+      { path: "/tmp/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+      { path: "/tmp/new.ts", oldText: null, newText: "export {};" },
+    ]);
+    expect(entry?.toolInfo).toEqual({
+      name: "lsp",
+      action: "definition",
+      args: { file: "src/foo.ts", line: 42 },
+      code: { language: "py", text: "print(1)" },
+    });
+  });
+});
+
 describe("isLatestTurnSettled", () => {
   const latestTurn = {
     turnId: TurnId.make("turn-1"),

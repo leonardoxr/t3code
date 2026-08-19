@@ -1,3 +1,4 @@
+import { parseDiffFromFile } from "@pierre/diffs";
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import type { FileDiffMetadata } from "@pierre/diffs/types";
 
@@ -149,6 +150,27 @@ export function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
     return raw.slice(2);
   }
   return raw;
+}
+
+/**
+ * Builds renderable diff metadata from raw before/after contents — the shape
+ * ACP tools ship inline (`{path, oldText, newText}`). Returns null when the
+ * contents produce no hunks (identical sides) or parsing fails.
+ */
+export function getRenderableDiffFromContents(
+  path: string,
+  oldText: string | null,
+  newText: string,
+): FileDiffMetadata | null {
+  try {
+    const fileDiff = parseDiffFromFile(
+      oldText === null ? null : { name: path, contents: oldText },
+      { name: path, contents: newText },
+    );
+    return fileDiff.hunks.length > 0 ? fileDiff : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
