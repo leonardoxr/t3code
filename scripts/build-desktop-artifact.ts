@@ -2988,9 +2988,23 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     }
   }
   if (!options.signed) {
-    buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
-    delete buildEnv.CSC_LINK;
-    delete buildEnv.CSC_KEY_PASSWORD;
+    // Fork knob: T3CODE_DESKTOP_SELF_SIGN=1 keeps a CSC_LINK/CSC_KEY_PASSWORD
+    // certificate (for example a long-lived self-signed identity) on the
+    // otherwise-unsigned path. Squirrel.Mac validates that an update's
+    // signing certificate matches the running app's, so unsigned/ad-hoc
+    // personal builds can never auto-update on macOS — a stable self-signed
+    // identity can, while notarization and the Apple passkey entitlements
+    // (which require `--signed` plus a real team + provisioning profile)
+    // stay off.
+    const selfSign =
+      buildEnv.T3CODE_DESKTOP_SELF_SIGN === "1" &&
+      buildEnv.CSC_LINK !== undefined &&
+      buildEnv.CSC_KEY_PASSWORD !== undefined;
+    if (!selfSign) {
+      buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+      delete buildEnv.CSC_LINK;
+      delete buildEnv.CSC_KEY_PASSWORD;
+    }
     delete buildEnv.APPLE_API_KEY;
     delete buildEnv.APPLE_API_KEY_ID;
     delete buildEnv.APPLE_API_ISSUER;
