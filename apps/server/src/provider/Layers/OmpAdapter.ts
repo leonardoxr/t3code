@@ -153,6 +153,9 @@ interface OmpSessionContext {
   turnStartedAtMillis: number | undefined;
   /** True while the silence watchdog has flagged the session quiet. */
   providerQuietMarked: boolean;
+  /** Millis the session was first marked quiet; drives the give-up timer.
+   * Undefined whenever providerQuietMarked is false. */
+  providerQuietSinceMillis: number | undefined;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
@@ -658,6 +661,34 @@ export function resolveOmpQuietTransition(input: {
   return input.quietAlreadyMarked ? { _tag: "clear" } : { _tag: "none" };
 }
 
+/**
+ * How long a session may stay flagged quiet before the watchdog gives up on
+ * the turn instead of leaving it "Working" forever. Distinct from — and much
+ * larger than — the quiet-mark threshold above: marking only informs the
+ * user something looks stalled (with a manual Stop still available); this
+ * is the point past which nobody is realistically still watching a banner,
+ * so the turn is failed automatically. Ten minutes of total silence is far
+ * beyond any legitimate non-streaming generation gap, so it only fires on a
+ * genuinely stuck provider (see the module doc for the retrying-forever
+ * failure mode this whole watchdog exists for).
+ */
+export const OMP_PROVIDER_SILENCE_GIVE_UP_THRESHOLD_MILLIS = 10 * 60_000;
+
+/**
+ * Decides whether sustained silence, tracked from the moment the watchdog
+ * first marked the session quiet, has crossed the give-up threshold.
+ */
+export function resolveOmpSilenceGiveUp(input: {
+  readonly nowMillis: number;
+  readonly quietSinceMillis: number | undefined;
+  readonly thresholdMillis: number;
+}): boolean {
+  return (
+    input.quietSinceMillis !== undefined &&
+    input.nowMillis - input.quietSinceMillis >= input.thresholdMillis
+  );
+}
+
 export function ompPromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
@@ -1121,6 +1152,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
         // The settlement's own session update clears providerQuietSince in
         // the read model; only the local watchdog state needs resetting.
         liveCtx.providerQuietMarked = false;
+        liveCtx.providerQuietSinceMillis = undefined;
         liveCtx.turnStartedAtMillis = undefined;
         // Async task jobs can outlive the turn inside omp, but the wire can
         // no longer update their rows once the turn is gone — mark them
@@ -1559,6 +1591,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             completedTaskIds: new Set(),
             turnStartedAtMillis: undefined,
             providerQuietMarked: false,
+            providerQuietSinceMillis: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
@@ -1787,23 +1820,65 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               quietAlreadyMarked: liveCtx.providerQuietMarked,
               thresholdMillis: OMP_PROVIDER_QUIET_THRESHOLD_MILLIS,
             });
-            if (transition._tag === "none") {
+            if (transition._tag === "mark" || transition._tag === "clear") {
+              liveCtx.providerQuietMarked = transition._tag === "mark";
+              liveCtx.providerQuietSinceMillis =
+                transition._tag === "mark" ? transition.quietSinceMillis : undefined;
+              yield* offerRuntimeEvent({
+                type: "session.state.changed",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: liveCtx.threadId,
+                payload: {
+                  state: "running",
+                  providerQuietSince:
+                    transition._tag === "mark"
+                      ? DateTime.formatIso(DateTime.makeUnsafe(transition.quietSinceMillis))
+                      : null,
+                },
+              });
+            }
+            // Give-up: the session has stayed quiet-marked past the much
+            // larger give-up threshold, independent of this tick's mark/clear
+            // transition — most ticks while stuck are steady-state "none".
+            // Fails the turn automatically instead of leaving it "Working"
+            // forever with nobody watching the quiet banner (review finding).
+            if (
+              !resolveOmpSilenceGiveUp({
+                nowMillis,
+                quietSinceMillis: liveCtx.providerQuietSinceMillis,
+                thresholdMillis: OMP_PROVIDER_SILENCE_GIVE_UP_THRESHOLD_MILLIS,
+              })
+            ) {
               return;
             }
-            liveCtx.providerQuietMarked = transition._tag === "mark";
-            yield* offerRuntimeEvent({
-              type: "session.state.changed",
-              ...(yield* makeEventStamp()),
-              provider: PROVIDER,
-              threadId: liveCtx.threadId,
-              payload: {
-                state: "running",
-                providerQuietSince:
-                  transition._tag === "mark"
-                    ? DateTime.formatIso(DateTime.makeUnsafe(transition.quietSinceMillis))
-                    : null,
-              },
-            });
+            const threadId = liveCtx.threadId;
+            yield* withThreadLock(
+              threadId,
+              Effect.gen(function* () {
+                const freshCtx = yield* requireSession(threadId);
+                const activeTurnId = freshCtx.activeTurnId ?? freshCtx.session.activeTurnId;
+                if (activeTurnId === undefined) {
+                  return;
+                }
+                freshCtx.interruptedTurnIds.add(activeTurnId);
+                freshCtx.providerQuietMarked = false;
+                freshCtx.providerQuietSinceMillis = undefined;
+                yield* Effect.ignore(
+                  freshCtx.acp.cancel.pipe(
+                    Effect.mapError((error) =>
+                      mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+                    ),
+                  ),
+                );
+                yield* settlePromptInFlight(threadId, activeTurnId, freshCtx.acpSessionId, {
+                  errorMessage: `Oh My Pi stopped responding: no output for ${
+                    OMP_PROVIDER_SILENCE_GIVE_UP_THRESHOLD_MILLIS / 60_000
+                  } minutes. The turn was stopped automatically — you can try again.`,
+                  settleAllPrompts: true,
+                });
+              }),
+            );
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Oh My Pi silence watchdog tick failed.", { cause }),
@@ -1871,9 +1946,13 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             // resolving from here on does not settle the turn; decremented on
             // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
-            // A prompt resets the silence baseline: the provider legitimately
-            // owes nothing until it starts working.
+            // A fresh prompt resets the silence baseline: the provider
+            // legitimately owes nothing until it starts working. This also
+            // clears a stale quiet-mark left by a turn that settled without
+            // an intervening notification (e.g. a bare stopReason).
             ctx.turnStartedAtMillis = yield* Clock.currentTimeMillis;
+            ctx.providerQuietMarked = false;
+            ctx.providerQuietSinceMillis = undefined;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
